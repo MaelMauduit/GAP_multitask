@@ -79,10 +79,14 @@
     # η :: Named tuple, noise variance
     # η = ( e=noise for training energies, f=noise for training forces, v=noise for training stresses )
 
-function X_normalise(X, train)
+function X_normalise(X, train, mean = true)
     all_indices = [train.e.p; [i for k in train.e.s for i in k]]
     whole_X = vcat([X[i][3] for i in all_indices]...)
-    mean_X = vec(Statistics.mean(whole_X, dims=1))  # (253,)
+    if mean
+        mean_X = vec(Statistics.mean(whole_X, dims=1))  # (253,)
+    else 
+        mean_X = zeros(size(whole_X, 2))
+    end
     std_X  = vec(Statistics.std(whole_X,  dims=1))  # (253,)
 
     L = []
@@ -142,59 +146,6 @@ function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false,
             
         return μ, Σ, K
 
-end
-
-function multitaskv1(X, Y, train, test, σ², ϱ; ζ=4, normalisation=false, filter = nothing)
-    nS = length(ϱ)
-
-    # covariances construites sur Y_norm
-    K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
-    data, mean_for_1_atom, std_for_1_atom = select_observations(X, Y, train, normalisation)
-    co = cond(K)
-    
-    if co > 1e10
-        println("Warning: covariance matrix is ill-conditioned, results may be inaccurate as ", "cond(K) = ", co)
-
-    else
-        println("Covariance matrix is well-conditioned, proceeding with predictions", " cond(K) = ", co)
-    end
-
-    Ktt = construct_covariance(X, test,  σ², ϱ, η, false, ζ)
-    Kt  = construct_covariance(X, train, test, σ², ϱ, σ², ϱ, ζ)
-
-    if filter 
-        println("Filtering covariance matrix")
-        kept_lines = create_filter_cov(X,train,ϱ)
-        K = K[kept_lines, kept_lines]
-        Kt = Kt[kept_lines, :]
-        data = data[kept_lines]
-        println("new cond(K) = ", cond(K))
-    end
-
-    ηbis = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
-    K_0 = construct_covariance(X, train, σ², ϱ, ηbis, true, ζ)
-    h = HyperParams(σ².e.p, σ².e.s, ϱ.e)
-    η = get_jitter(h, K_0, Y, train)
-    println("Jitter for energies: ", η.e.p, " ", η.e.s)
-    println("Jitter for forces: ", η.f.p, " ", η.f.s)
-    println("Jitter for stresses: ", η.v.p, " ", η.v.s)
-
-    β = K \ Kt
-    μ = β' * data
-    Σ = Ktt - β' * Kt
-
-    if normalisation
-            numbers_of_atoms = [ size(X[i][3])[1] for i in test.e.p ]            
-            for s in test.e.s
-                append!(numbers_of_atoms, [ size(X[i][3])[1] for i in s ])
-            end
-        println(μ[1],)
-        μ = [(μ[k]*std_for_1_atom+numbers_of_atoms[k]*mean_for_1_atom) for k in 1:length(μ)] 
-        println(μ[1], " ", mean_for_1_atom,  " ",std_for_1_atom,  " ",numbers_of_atoms[1])
-        return μ, Σ .* std_for_1_atom^2
-    end
-
-    return μ, Σ
 end
 
 
