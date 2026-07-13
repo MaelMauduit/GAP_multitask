@@ -1,4 +1,4 @@
-desc = SOAPDescriptor(species=["Si"], r_cut=13.0, n_max=8, l_max=6, sigma=0.5)
+desc = SOAPDescriptor(species=["Si"], r_cut=10.0, n_max=12, l_max=6, sigma=0.5)
 
 function read_data(file)
     f = path*file
@@ -139,6 +139,19 @@ function Cosine_func(u,v,limit)
     nu = norm(u)
     nv = norm(v)
     if nu < limit 
+        println("something weird happened")
+        return 2
+    end
+    if nv < limit
+        return -2
+    end
+    return dot(u,v)/(norm(u)*norm(v))
+end
+
+function Cosine_func(u,v,limit)
+    nu = norm(u)
+    nv = norm(v)
+    if nu < limit 
         return 2
     end
     if nv < limit
@@ -177,7 +190,7 @@ function filter_cov(K_no_hyper)
     return kept
 end
 
-function create_filter_cov(X,train,nS)
+function create_filter_cov_raw(X,train,nS)
     # careful, may be an issue with multitask as sigma is ill calibrated. Fix the selection in this case.
     vect_one = ones(nS)
     σ² = (e = (p = 1.0, s = 1. * vect_one), f = (p = 1.0, s = 1. * vect_one), v = (p = 1.0, s = 1.0 * vect_one)) 
@@ -187,3 +200,71 @@ function create_filter_cov(X,train,nS)
     kept_lines = filter_cov(K_no_hyper)
     return kept_lines
 end
+
+function extract_full_rank_submatrix(K::AbstractMatrix; rtol=1e-8, verbose=true)
+    n = size(K)[1]
+    
+    F = qr(K, ColumnNorm())        # RRQR: pivots ordered by information content
+    r_diag = abs.(diag(F.R))
+    tol = rtol * r_diag[1]
+    r = count(r_diag .> tol)
+
+    kept = sort(F.p[1:r])             # indices to keep, as ROW = COLUMN indices
+
+    if verbose
+        println("QR-pivoted rank = ", r, " / ", n, "  (dropped ", n - r, " indices)")
+    end
+
+    return kept
+end
+
+function create_filter_cov(X,train,nS)
+    # careful, may be an issue with multitask as sigma is ill calibrated. Fix the selection in this case.
+    vect_one = ones(nS)
+    σ² = (e = (p = 1.0, s = 1. * vect_one), f = (p = 1.0, s = 1. * vect_one), v = (p = 1.0, s = 1.0 * vect_one)) 
+    η = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
+    ϱ = (e = 1.0 .* ones(nS), f = 1.0 .* ones(nS), v = 1.0 .* ones(nS))
+    K_no_hyper = construct_covariance(X, train, σ², ϱ, η, true, ζ)
+    kept_lines = extract_full_rank_submatrix(K_no_hyper)
+    return kept_lines
+end
+
+function plot_eigenvalues(K)
+    λK  = eigvals(Symmetric(K))
+    fig = Figure()
+    ax = Axis(fig[1,1], xlabel="index", ylabel="log10|eigenvalue|",
+            title="Eigenvalue spectra")
+    scatter!(ax, 1:length(λK),  log10.(abs.(λK)),  label="K")
+    axislegend(ax, position=:rb)
+    fig
+end
+
+function plot_predictions(y_pred, y_true, number_of_atoms = nothing)
+    @assert length(y_true) == length(y_pred) "y_true and y_pred must have equal length"
+    y_true = abs.(y_true)
+    y_pred = abs.(y_pred)
+    if  !isnothing(number_of_atoms)
+        y_true = y_true ./ number_of_atoms
+        y_pred = y_pred ./ number_of_atoms
+    end
+
+    fig = Figure()
+    ax = Axis(fig[1, 1],
+        xlabel = "True",
+        ylabel = "Predicted",
+        title = "Predicted vs True")
+
+    lo, hi = extrema(vcat(y_true, y_pred))
+    pad = 0.05 * (hi - lo)
+
+    scatter!(ax, y_true, y_pred, color = (:steelblue, 0.6), markersize = 8, label = "predictions")
+    lines!(ax, [lo - pad, hi + pad], [lo - pad, hi + pad],
+        color = :black, linestyle = :dash, linewidth = 2, label = "y = x")
+
+    xlims!(ax, lo - pad, hi + pad)
+    ylims!(ax, lo - pad, hi + pad)
+    axislegend(ax, position = :rb)
+
+    fig
+end
+

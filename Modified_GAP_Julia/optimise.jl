@@ -24,6 +24,13 @@ function BlockSizes(Y, trainP)
     return ne, nf, nv
 end
 
+function safe_mean_diag(K_0, range)
+    if isempty(range)
+        return 1.0   
+    end
+    return Statistics.mean(diag(K_0[range, range]))
+end
+
 function get_jitter(h::HyperParams, K_0, Y, train, kept_lines)
     nS = length(h.ϱ)
     vect_one = ones(nS)
@@ -32,12 +39,14 @@ function get_jitter(h::HyperParams, K_0, Y, train, kept_lines)
     true_ne = length(sort_lines[sort_lines .<= ne])
     true_nf = length(sort_lines[(sort_lines .> ne) .& (sort_lines .<= ne + nf)])
     true_nv = length(sort_lines[sort_lines .> ne + nf])
-    Me = Statistics.mean(diag(K_0[1:true_ne, 1:true_ne]))
-    Mf = Statistics.mean(diag(K_0[true_ne+1:true_ne+true_nf, true_ne+1:true_ne+true_nf]))
-    Mv = Statistics.mean(diag(K_0[true_ne+true_nf+1:true_ne+true_nf+true_nv, true_ne+true_nf+1:true_ne+true_nf+true_nv]))
-    ηe = 1e-9 * Me
-    ηf = 1e-6* Mf
-    ηv = 1e-6* Mv 
+
+    Me = safe_mean_diag(K_0, 1:true_ne)
+    Mf = safe_mean_diag(K_0, true_ne+1:true_ne+true_nf)
+    Mv = safe_mean_diag(K_0, true_ne+true_nf+1:true_ne+true_nf+true_nv)
+
+    ηe = 1e-9 * Me 
+    ηf = 1e-6 * Mf 
+    ηv = 1e-6 * Mv 
     η  = ( e=( p=ηe, s=ηe * vect_one ), f=( p=ηf, s=ηf * vect_one ), v=( p=ηv, s=ηv * vect_one ))
     return η
 end
@@ -76,7 +85,7 @@ function nll(lh, C::CovMatrices, y, number_of_tasks, Y, train, kept_lines)
     # ηv = 10^lh[2*nS+4]
 
     h = HyperParams(σ²e, σ², ϱ)  
-    y = y[kept_lines]
+    y = y[kept_lines] 
     try
         Cho = full_matrix(h, C, Y, train, kept_lines)
         return 0.5 * dot(y, Cho \ y) + sum(log.(diag(Cho.L)))
@@ -157,7 +166,6 @@ function Global_optimizer(X, Y, train, kept_lines, number_of_tasks,  normalisati
     K_0 = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true)
     h = HyperParams(σ².e.p, σ².e.s, ϱ.e)
     η  = get_jitter(h, K_0, Y, train, kept_lines)
-    println 
     return σ², ϱ, η
 
 end

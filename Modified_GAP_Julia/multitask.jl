@@ -19,7 +19,7 @@
     include( path*"/auxiliary.jl")
     include( path*"/inner_kernel.jl")
     include( path*"/quip_descriptors.jl")
-    include( path*"/Opti_all_in_one.jl")
+    include( path*"/optimise.jl")
 
     function r2(m, truth)
         ss_res = sum((m .- truth).^2)
@@ -29,6 +29,7 @@
 
     rmse(y_true, y_pred) = sqrt(Statistics.mean((y_true .- y_pred).^2))
 
+    rmse_relative(y_true, y_pred) = sqrt(Statistics.mean(((y_true .- y_pred).^2) ./ max.(abs.(y_true), 1e-8).^2))
     # ---------------------------------------------------------------
     # ===============================================================
     #
@@ -78,24 +79,105 @@
     # η :: Named tuple, noise variance
     # η = ( e=noise for training energies, f=noise for training forces, v=noise for training stresses )
 
-function multitask(X, Y, train, test, σ², ϱ, η; ζ=4, normalisation=false)
+function X_normalise(X, train)
+    all_indices = [train.e.p; [i for k in train.e.s for i in k]]
+    whole_X = vcat([X[i][3] for i in all_indices]...)
+    mean_X = vec(Statistics.mean(whole_X, dims=1))  # (253,)
+    std_X  = vec(Statistics.std(whole_X,  dims=1))  # (253,)
 
-    # normalisation d'abord
+    L = []
+    for k in 1:length(std_X)
+        if std_X[k] == 0.0
+            std_X[k] = 1.0
+            push!(L, k)
+        end
+    end
+    println("The following std coordinates are 0 and replaced by 1: ", L)
+
+    std_4d = reshape(std_X, 1, 1, 1, :)  # (1,1,1,253) pour broadcaster sur (16,16,3,253)
+
+    Xtilde = [(X[k][1] ./ std_4d, X[k][2], (X[k][3] .- mean_X') ./ std_X') for k in 1:length(X)]
+    return Xtilde
+end
+
+function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false, denorm = true)
+    kept_lines = create_filter_cov(X,train,number_of_task)
+    σ², ϱ, η = Global_optimizer(X, Y, train, kept_lines, number_of_task, normalisation, ζ)
+    println("The hyperparameters have been optimised with σ² = ", σ², " ϱ = ", ϱ, " η = ", η)
+    K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
+    K = K[kept_lines, kept_lines]
+    λ = eigvals(K)
+    println("The conditionning number is cond(K) = ", cond(K), "\n")
+    println("The smallest eigenvalue is ", minimum(λ), " and the biggest is ", maximum(λ))
+    Kt  = construct_covariance(X, train, test, σ², ϱ, σ², ϱ, ζ)
+    Kt = Kt[kept_lines, :]
+    Ktt = construct_covariance(X, test,  σ², ϱ, η, false, ζ)
+
     data, mean_for_1_atom, std_for_1_atom = select_observations(X, Y, train, normalisation)
-    # print("data", data)
+    data = data[kept_lines]
+    
+    β = K \ Kt
+    μ = β' * data
+    Σ = Ktt - β' * Kt
+    if !denorm
+        return μ, Σ, K
+    end
+    if normalisation
+        numbers_of_atoms = [ size(X[i][3])[1] for i in test_e_and_f.e.p ]            
+        for s in test_e_and_f.e.s
+            append!(numbers_of_atoms, [ size(X[i][3])[1] for i in s ])
+        end
+        L = length(numbers_of_atoms)
+        μ[1:L] = [(μ[k]*std_for_1_atom+numbers_of_atoms[k]*mean_for_1_atom) for k in 1:L] 
+
+        numbers_of_forces = [ size(X[i][3])[1] for i in test_e_and_f.f.p ]            
+        for s in test_e_and_f.f.s
+            append!(numbers_of_forces, [ size(X[i][3])[1] for i in s ])
+        end
+        nb_forces = 3 * sum(numbers_of_forces)
+        μ[L+1 : end] = [(μ[L + k] .*std_for_1_atom) for k in 1:nb_forces]  
+            
+        return μ, Σ .* std_for_1_atom^2, K
+    end
+            
+        return μ, Σ, K
+
+end
+
+function multitaskv1(X, Y, train, test, σ², ϱ; ζ=4, normalisation=false, filter = nothing)
+    nS = length(ϱ)
 
     # covariances construites sur Y_norm
-    K   = construct_covariance(X, train, σ², ϱ, η, true, ζ)
-    println("conditioning: ", cond(K))
-    if cond(K) > 1e10
-        println("Warning: covariance matrix is ill-conditioned, results may be inaccurate")
-        println("Condition number: ", cond(K))
+    K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
+    data, mean_for_1_atom, std_for_1_atom = select_observations(X, Y, train, normalisation)
+    co = cond(K)
+    
+    if co > 1e10
+        println("Warning: covariance matrix is ill-conditioned, results may be inaccurate as ", "cond(K) = ", co)
 
     else
-        println("Covariance matrix is well-conditioned, proceeding with predictions")
+        println("Covariance matrix is well-conditioned, proceeding with predictions", " cond(K) = ", co)
     end
+
     Ktt = construct_covariance(X, test,  σ², ϱ, η, false, ζ)
     Kt  = construct_covariance(X, train, test, σ², ϱ, σ², ϱ, ζ)
+
+    if filter 
+        println("Filtering covariance matrix")
+        kept_lines = create_filter_cov(X,train,ϱ)
+        K = K[kept_lines, kept_lines]
+        Kt = Kt[kept_lines, :]
+        data = data[kept_lines]
+        println("new cond(K) = ", cond(K))
+    end
+
+    ηbis = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
+    K_0 = construct_covariance(X, train, σ², ϱ, ηbis, true, ζ)
+    h = HyperParams(σ².e.p, σ².e.s, ϱ.e)
+    η = get_jitter(h, K_0, Y, train)
+    println("Jitter for energies: ", η.e.p, " ", η.e.s)
+    println("Jitter for forces: ", η.f.p, " ", η.f.s)
+    println("Jitter for stresses: ", η.v.p, " ", η.v.s)
 
     β = K \ Kt
     μ = β' * data
@@ -127,7 +209,7 @@ end
 
     # use to construct train-train and test-test covariances
     # the split in two functions will be helpful to accelerate hyperparameters optimisation
-    function construct_covariance( X::AbstractArray, key::NamedTuple, σ²::NamedTuple, ϱ::NamedTuple, η::NamedTuple, noise::Bool, ζ = 4 )  
+    function construct_covariance( X::AbstractArray, key::NamedTuple, σ²::NamedTuple, ϱ::NamedTuple, η::NamedTuple, noise::Bool, ζ = 4)
         Ce, Cf, Cv, Cfe, Cve, Cvf = construct_matrices(X, key, ζ)
         K = hyperparameters(Ce, Cf, Cv, Cfe, Cve, Cvf, σ², ϱ, η, noise)
         return K
@@ -158,8 +240,7 @@ end
     end
 
     # use to construct train-test covariances
-    function construct_covariance( X::AbstractArray, key_a::NamedTuple, key_b::NamedTuple, σ²_a::NamedTuple, ϱ_a::NamedTuple, σ²_b::NamedTuple, ϱ_b::NamedTuple, ζ = 4 )
-
+    function construct_covariance( X::AbstractArray, key_a::NamedTuple, key_b::NamedTuple, σ²_a::NamedTuple, ϱ_a::NamedTuple, σ²_b::NamedTuple, ϱ_b::NamedTuple, ζ = 4)
         # construct base covariances, no hyperparameters
         Ce  = rectangular( X, key_a.e, key_b.e ; C=energy, ζ )
         Cf  = rectangular( X, key_a.f, key_b.f ; C=force, ζ  )
@@ -252,7 +333,7 @@ end
     #-----------------------------------------
 
     # extract training obervations from full system information Y
-    function select_observations( X::AbstractArray, Y::AbstractArray, key::NamedTuple, normalisation::Bool)
+    function select_observations( X::AbstractArray, Y::AbstractArray, key::NamedTuple, normalisation::Bool, the_mean = nothing, the_std = nothing)
         energies = [ Y[i].e          for i in key.e.p ]
         forces   = vcat([ vec(-Y[i].f)  for i in key.f.p ]...)
         virials  = vcat([ vec(-Y[i].v)  for i in key.v.p ]...)
@@ -289,7 +370,17 @@ end
                             for k in 1:n_primary]
             std_E = Statistics.std(Average_local, corrected=false)
 
+            if std_E == 0
+                println("a unique value of energy may engender a failed prediction")
+                std_E = 1
+            end
 
+            if  !isnothing(the_mean)
+                mean_for_1_atom = the_mean
+            end
+            if  !isnothing(the_std)
+                std_E = the_std
+            end
             # normaliser tout (HF + LF) avec ce mean/std
             energies = [(energies[k] - numbers_of_atoms[k]*mean_for_1_atom) / std_E
                         for k in 1:number_of_simu]
