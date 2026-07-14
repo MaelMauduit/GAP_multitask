@@ -105,9 +105,11 @@ function X_normalise(X, train, mean = true)
 end
 
 function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false, denorm = true)
-    kept_lines = create_filter_cov(X,train,number_of_task)
+    kept_lines = create_filter_cov(X,train,number_of_task,ζ)
     σ², ϱ, η = Global_optimizer(X, Y, train, kept_lines, number_of_task, normalisation, ζ)
     println("The hyperparameters have been optimised with σ² = ", σ², " ϱ = ", ϱ, " η = ", η)
+
+
     K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
     K = K[kept_lines, kept_lines]
     λ = eigvals(K)
@@ -123,9 +125,11 @@ function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false,
     β = K \ Kt
     μ = β' * data
     Σ = Ktt - β' * Kt
+
     if !denorm
         return μ, Σ, K
     end
+
     if normalisation
         numbers_of_atoms = [ size(X[i][3])[1] for i in test_e_and_f.e.p ]            
         for s in test_e_and_f.e.s
@@ -144,8 +148,7 @@ function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false,
         return μ, Σ .* std_for_1_atom^2, K
     end
             
-        return μ, Σ, K
-
+    return μ, Σ, K
 end
 
 

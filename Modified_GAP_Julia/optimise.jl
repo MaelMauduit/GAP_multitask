@@ -103,7 +103,7 @@ function optim(C::CovMatrices, y, nS, train, kept_lines)
 
     lower = fill(-8.0, w)
     upper = fill(8.0, w)
-    p0 = vcat([-1], fill(-4., nS), fill(0., nS))
+    p0 = vcat([-0], fill(-4., nS), fill(0., nS))
 
     result = optimize(
         f,

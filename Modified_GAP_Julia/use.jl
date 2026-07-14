@@ -33,7 +33,12 @@ X = X_normalise(X, indx) # Normalise the features
 # Selecting train and validation datasets
 # ============================================================
 
-train_features = fps(X[1:ltrain26], (1*ltrain26)//4)
+# idx = shuffle(1:ltrain26)
+
+# train_features = idx[1:(3*ltrain26) ÷ 4]
+# test_features = idx[((3*ltrain26) ÷ 4) + 1:end]
+
+train_features = fps(X[1:ltrain26], (3*ltrain26)//4)
 test_features = setdiff(1:ltrain26, train_features)
 
 train = (e = (p = union(train_features), s = []), v = (p = [], s = []), f = (p = train_features, s = []))
@@ -71,6 +76,7 @@ m, S, K = multitask(
     normalisation = normalisation,
     denorm = false
 )
+V = sqrt.(diag(S)) 
 
 
 
@@ -79,15 +85,17 @@ m, S, K = multitask(
 # Studying the results
 # ============================================================
 
-E_pred = m[1:length(test_features)]
-F_pred = m[length(test_features)+1:end]
-Var = diag(S)
-
 _, mean, std = select_observations(X, Y, train, true)
 truth, _, _  = select_observations(X, Y, test_e, true, mean, std)
+truth = truth .*std
+
 forces, _, _ = select_observations(X, Y, test_f, false)
 
-forces = forces ./ std
+E_pred = m[1:length(test_features)] .*std
+std_E = V[1:length(test_features)] .*std
+F_pred = m[length(test_features)+1:end] .*std
+std_F = V[length(test_features)+1:end] .*std
+
 
 # Need the number of atoms to normalize the contribution.
 numbers_of_atoms = [ size(X[i][3])[1] for i in test_e_and_f.e.p ]            
@@ -95,9 +103,9 @@ for s in test_e_and_f.e.s
     append!(numbers_of_atoms, [ size(X[i][3])[1] for i in s ])
 end
 
-plot_predictions(E_pred .*std, truth .*std, numbers_of_atoms)
-plot_predictions(F_pred.*std, forces.*std)
-plot_eigenvalues(K)
+# plot_predictions(E_pred, truth, std_E, numbers_of_atoms)
+# plot_predictions(F_pred, forces)
+# plot_eigenvalues(K)
 
 
 ε       = r2(E_pred, truth)
@@ -106,4 +114,10 @@ plot_eigenvalues(K)
 println("Energy R²  = ", ε)
 println("Force  R²  = ", εforces)
 
+y_true = truth ./ numbers_of_atoms
+y_pred = E_pred ./ numbers_of_atoms
 
+fig = plot_predictions_pro(y_pred, y_true, std_E; model_name = "GNN-v2")
+
+
+ 
