@@ -19,9 +19,8 @@
     include( path*"/auxiliary.jl")
     include( path*"/inner_kernel.jl")
     include( path*"/quip_descriptors.jl")
-    include( path*"/optimise.jl")
+    include( path*"/optimise2.jl")
     include("tools.jl")
-
 
     function r2(m, truth)
         ss_res = sum((m .- truth).^2)
@@ -106,25 +105,29 @@ function X_normalise(X, train, mean = true)
     return Xtilde
 end
 
-function multitask(X, Y, train, test, number_of_tasks; ζ=4, normalisation=false, denorm = true, hyper = nothing)
-    kept_lines = create_filter_cov(X,train,number_of_tasks,ζ)
+function multitask(X, Y, train, test, number_of_task; ζ=4, normalisation=false, denorm = true, hyper = nothing)
+    kept_lines = create_filter_cov(X,train,number_of_task,ζ)
     if isnothing(hyper)
-        σ², ϱ, η = Global_optimizer(X, Y, train, kept_lines, number_of_tasks, normalisation, ζ)
+        σ², ϱ, η = Global_optimizer(X, Y, train, kept_lines, number_of_task, normalisation, ζ)
     else
         σ², ϱ, η = hyper
     end
     println("The hyperparameters have been optimised with σ² = ", σ², " ϱ = ", ϱ, " η = ", η)
-    
-    ηe = 0
-    vect_one = ones(number_of_tasks)
-    η  = ( e=( p=ηe, s=ηe * vect_one ), f=( p=ηe, s=ηe * vect_one ), v=( p=ηe, s=ηe * vect_one ))
-    Ce, Cf, Cv, Cfe, Cve, Cvf = construct_matrices(X, train, ζ)
-    K_0 = hyperparameters(Ce, Cf, Cv, Cfe, Cve, Cvf, σ², ϱ, η, true)
-    h = HyperParams(σ².e.p, σ².e.s, ϱ.e)
-    η  = get_jitter(h, K_0, Y, train, kept_lines)
-    
+
+
     K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
     K = K[kept_lines, kept_lines]
+    
+    h= HyperParams(σ².e.p, σ².e.s, ϱ.e, η.e.p, η.f.p, η.v.p)
+    jitter  = get_jitter(h, K, Y, train, kept_lines)
+    ne, ηe = jitter[1]
+    println("The problem ?", get_jitter(h, K, Y, train, kept_lines))
+    nf, ηf = jitter[2]
+    nv, ηv = jitter[3]
+
+    D = Diagonal(vcat(fill(ηe, ne), fill(ηf, nf), fill(ηv, nv)))
+
+    K = K + D
     
     λ = eigvals(K)
     println("The conditionning number is cond(K) = ", cond(K), "\n")
@@ -426,8 +429,8 @@ end
 
     # C = CovMatrices(Ce, Cf, Cv, Cfe, Cve, Cvf)
 
-    # number_of_taskss = length(Ce.ps)
-    # vect_one = ones(number_of_taskss)
+    # number_of_tasks = length(Ce.ps)
+    # vect_one = ones(number_of_tasks)
 
     # siz = BlockSizes(Y, train)
 

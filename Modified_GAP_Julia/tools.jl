@@ -1,6 +1,13 @@
-desc = SOAPDescriptor(species=["Si"], r_cut=10.0, n_max=12, l_max=6, sigma=0.5)
-
-function read_data(file)
+using Printf
+using GLMakie
+function read_data(file; r_cut=10.0, n_max=10, l_max=8, sigma=0.5)
+    desc = SOAPDescriptor(
+        species=["Si"],
+        r_cut=r_cut,
+        n_max=n_max,
+        l_max=l_max,
+        sigma=sigma
+    )    
     f = path*file
     configs = ase.read(f, index=":")
     l = length(configs)
@@ -276,9 +283,12 @@ function plot_predictions(y_pred, y_true, std, number_of_atoms = nothing)
 end
 
 
+
+
+
 # ==============================================================================
-# Inverse standard normal CDF (Acklam's algorithm) — no extra dependency needed
-# Used only for the calibration / reliability panel.
+# Inverse standard normal CDF (Acklam's algorithm) — no extra dependency needed.
+# Used for the calibration/reliability panels and their sampling-noise band.
 # ==============================================================================
 function norminvcdf(p::Real)
     a = (-3.969683028665376e+01,  2.209460984245205e+02,
@@ -292,10 +302,10 @@ function norminvcdf(p::Real)
           4.374664141464968e+00,  2.938163982698783e+00)
     d = ( 7.784695709041462e-03,  3.224671290700398e-01,
           2.445134137142996e+00,  3.754408661907416e+00)
- 
+
     p_low  = 0.02425
     p_high = 1 - p_low
- 
+
     if p < p_low
         q = sqrt(-2*log(p))
         return (((((c[1]*q+c[2])*q+c[3])*q+c[4])*q+c[5])*q+c[6]) /
@@ -311,42 +321,152 @@ function norminvcdf(p::Real)
                 ((((d[1]*q+d[2])*q+d[3])*q+d[4])*q+1)
     end
 end
- 
-# ==============================================================================
-# Main plotting function
-# ==============================================================================
-"""
-    plot_predictions_pro(y_pred, y_true, std, number_of_atoms=nothing;
-                          model_name="", save_path=nothing)
- 
-Four-panel diagnostic figure for a regression model with predictive uncertainty:
- 
-  A) Parity plot (predicted vs true), points colored by |residual|/σ
-  B) Distribution of residuals vs. the uncertainty implied by σ
-  C) Residuals vs true value, with ±1σ / ±2σ reference bands
-  D) Calibration (reliability) curve: nominal vs empirical coverage
- 
-`std` is treated as the model's predicted per-sample standard deviation.
-"""
-function plot_predictions_pro(y_pred, y_true, std;
-                               model_name::String = "", save_path::Union{Nothing,String} = nothing)
- 
-    @assert length(y_true) == length(y_pred) == length(std) "y_pred, y_true and std must have the same length"
- 
-    std    = abs.(Float64.(std))
- 
-    residuals = y_pred .- y_true
-    z         = residuals ./ std                       # standardized residuals
-    mean_std  = Statistics.mean(std)
- 
+
+# Category used consistently for the |z|-based color coding (top-level, pure — no state to mix up).
+cat_of(zi::Real) = abs(zi) <= 1 ? 1 : (abs(zi) <= 2 ? 2 : 3)
+
+function _fit_stats(residuals, ytrue)
     mae  = Statistics.mean(abs.(residuals))
     rmse = sqrt(Statistics.mean(residuals .^ 2))
-    r2   = 1 - sum(residuals .^ 2) / sum((y_true .- Statistics.mean(y_true)) .^ 2)
- 
-    lo, hi = extrema(vcat(y_true, y_pred))
+    r2   = 1 - sum(residuals .^ 2) / sum((ytrue .- Statistics.mean(ytrue)) .^ 2)
+    return mae, rmse, r2
+end
+
+# ==============================================================================
+# PropertyDiag — bundles everything needed to diagnose ONE property (energy or
+# forces) into a single immutable object. This is the key robustness change:
+# ytrue/ypred/sigma/residuals/z/idx1/idx2/idx3 for a given property never
+# travel around as loose, independently-orderable function arguments, so a
+# mix-up like "forces' index mask applied to energy's array" becomes
+# structurally impossible rather than just "shouldn't happen if every call
+# site is written correctly".
+# ==============================================================================
+struct PropertyDiag
+    label::String
+    ytrue::Vector{Float64}
+    ypred::Vector{Float64}
+    sigma::Vector{Float64}
+    resid::Vector{Float64}
+    z::Vector{Float64}
+    xr::Vector{Float64}
+    mae::Float64
+    rmse::Float64
+    r2::Float64
+end
+
+function PropertyDiag(label::String, ytrue, ypred, sigma)
+    ytrue = Float64.(ytrue)
+    ypred = Float64.(ypred)
+    sigma = max.(abs.(Float64.(sigma)), 1e-12)   # guard against zero/negative sigma
+
+    n = length(ytrue)
+    length(ypred) == n || throw(DimensionMismatch(
+        "$label: ytrue has $n elements but ypred has $(length(ypred))"))
+    length(sigma) == n || throw(DimensionMismatch(
+        "$label: ytrue has $n elements but sigma has $(length(sigma))"))
+
+    resid = ypred .- ytrue
+    z     = resid ./ sigma
+    mae, rmse, r2 = _fit_stats(resid, ytrue)
+
+    lo, hi = extrema(vcat(ytrue, ypred))
     pad = 0.05 * (hi - lo)
     xr  = [lo - pad, hi + pad]
- 
+
+    return PropertyDiag(label, ytrue, ypred, sigma, resid, z, xr, mae, rmse, r2)
+end
+
+Base.length(pd::PropertyDiag) = length(pd.ytrue)
+
+# ==============================================================================
+# Draws all three panels (parity, residuals vs true, calibration) for ONE
+# property into column `col` of `fig`. idx1/idx2/idx3
+# are computed and consumed entirely inside this single call — they are never
+# returned, never passed as arguments, never stored anywhere the other
+# property's panels could reach them.
+# ==============================================================================
+function add_property_panels!(fig, col::Int, pd::PropertyDiag, palette, unit::String)
+    c_accent, c_good, c_mid, c_bad, c_err = palette.c_accent, palette.c_good, palette.c_mid, palette.c_bad, palette.c_err
+    n = length(pd)
+
+    cats = cat_of.(pd.z)
+    idx1, idx2, idx3 = cats .== 1, cats .== 2, cats .== 3
+    @assert length(idx1) == n "internal error: index mask length ($(length(idx1))) != $(pd.label) data length ($n)"
+
+    # ---- Row 1: parity plot -------------------------------------------------
+    ax1 = Axis(fig[1, col], xlabel = "True ($unit)", ylabel = "Predicted ($unit)",
+        title = "Predicted vs. true ($(pd.label))",
+        subtitle = @sprintf("MAE = %.4g   RMSE = %.4g   R² = %.4f   (N=%d)", pd.mae, pd.rmse, pd.r2, n),
+        aspect = DataAspect())
+
+    errorbars!(ax1, pd.ytrue, pd.ypred, pd.sigma, pd.sigma, color = c_err, linewidth = 1, whiskerwidth = 0)
+    scatter!(ax1, pd.ytrue[idx1], pd.ypred[idx1], color = (c_good, 0.65), markersize = 9,
+             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| ≤ 1")
+    scatter!(ax1, pd.ytrue[idx2], pd.ypred[idx2], color = (c_mid, 0.75), markersize = 9,
+             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "1 < |z| ≤ 2")
+    scatter!(ax1, pd.ytrue[idx3], pd.ypred[idx3], color = (c_bad, 0.85), markersize = 9,
+             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| > 2")
+    lines!(ax1, pd.xr, pd.xr, color = c_accent, linestyle = :dash, linewidth = 2)
+    xlims!(ax1, pd.xr...); ylims!(ax1, pd.xr...)
+    axislegend(ax1, position = :rb, labelsize = 12)
+
+    # ---- Row 2: residuals vs. true ------------------------------------------
+    ax3 = Axis(fig[2, col], xlabel = "True ($unit)", ylabel = "Prediction error ($unit)",
+        title = "Residuals ($(pd.label))")
+
+    scatter!(ax3, pd.ytrue[idx1], pd.resid[idx1], color = (c_good, 0.65), markersize = 8)
+    scatter!(ax3, pd.ytrue[idx2], pd.resid[idx2], color = (c_mid, 0.75), markersize = 8)
+    scatter!(ax3, pd.ytrue[idx3], pd.resid[idx3], color = (c_bad, 0.85), markersize = 8)
+    hlines!(ax3, [0.0], color = :black, linestyle = :dash, linewidth = 2)
+    xlims!(ax3, pd.xr...)
+
+    # ---- Row 3: calibration / reliability, with Wilson sampling-noise band --
+    ax4 = Axis(fig[3, col], xlabel = "Nominal confidence level", ylabel = "Empirical coverage",
+        title = "Uncertainty calibration ($(pd.label))", aspect = DataAspect())
+
+    levels = collect(union(0.05:0.05:0.95,0.99))
+    observed = [Statistics.mean(abs.(pd.z) .<= norminvcdf(0.5 + p/2)) for p in levels]
+    calib_err = Statistics.mean(abs.(observed .- levels))
+    ax4.subtitle = @sprintf("Mean calibration error = %.3f   (N = %d)", calib_err, n)
+
+    lines!(ax4, [0, 1], [0, 1], color = c_accent, linestyle = :dash, linewidth = 2, label = "Perfect calibration")
+    lines!(ax4, levels, observed, color = c_bad, linewidth = 2.5)
+    scatter!(ax4, levels, observed, color = c_bad, markersize = 8, label = "Model")
+    xlims!(ax4, 0, 1); ylims!(ax4, 0, 1)
+    axislegend(ax4, position = :lt, labelsize = 11)
+
+    return nothing
+end
+
+# ==============================================================================
+# Main entry point
+# ==============================================================================
+"""
+    plot_predictions_pro(e_pred, e_true, std, f_pred, f_true, std_f;
+                          model_name="", save_path=nothing)
+
+Six-panel diagnostic figure for a regression model (e.g. an interatomic
+potential) that predicts both energies and forces together with a per-sample
+predictive standard deviation for each.
+
+For energies and, separately, for forces:
+  • Parity plot (predicted vs. true), points colored by |residual|/σ
+  • Residuals vs. true value
+  • Calibration (reliability) curve: nominal vs. empirical coverage, with a
+    95% sampling-noise band (Wilson score interval) so deviations from the
+    diagonal can be judged against what a finite sample alone would produce
+
+`std` / `std_f` are the model's predicted per-sample standard deviations for
+energies and forces respectively. `e_*` and `f_*` may have different lengths
+(e.g. one energy per structure vs. three force components per atom) — each
+property is validated and plotted independently.
+"""
+function plot_predictions_pro(e_pred, e_true, std, f_pred, f_true, std_f;
+                               model_name::String = "", save_path::Union{Nothing,String} = nothing)
+
+    energy = PropertyDiag("energy", e_true, e_pred, std)
+    forces = PropertyDiag("forces", f_true, f_pred, std_f)
+
     # -------------------------------------------------------------------------
     # Palette & theme — clean "editorial" look
     # -------------------------------------------------------------------------
@@ -357,7 +477,9 @@ function plot_predictions_pro(y_pred, y_true, std;
     c_mid    = "#E9C46A"   # amber   -> 1 < |z| <= 2
     c_bad    = "#E76F51"   # coral   -> |z| > 2
     c_err    = (:gray40, 0.25)
- 
+    palette  = (c_bg = c_bg, c_grid = c_grid, c_accent = c_accent,
+                c_good = c_good, c_mid = c_mid, c_bad = c_bad, c_err = c_err)
+
     set_theme!(Theme(
         fontsize = 15,
         font = "TeX Gyre Heros Makie",
@@ -374,107 +496,22 @@ function plot_predictions_pro(y_pred, y_true, std;
         ),
         Legend = (framevisible = true, backgroundcolor = (:white, 0.8), padding = (8,8,8,8)),
     ))
- 
-    fig = Figure(size = (1250, 1000), backgroundcolor = c_bg)
- 
+
+    fig = Figure(size = (1250, 1500), backgroundcolor = c_bg)
+
     Label(fig[0, 1:2],
         isempty(model_name) ? "Model performance diagnostics" : "Model performance diagnostics — $model_name",
         fontsize = 22, font = "TeX Gyre Heros Bold Makie")
- 
-    # Category assignment used consistently across panels A & C
-    cat_of(zi) = abs(zi) <= 1 ? 1 : (abs(zi) <= 2 ? 2 : 3)
-    cats = cat_of.(z)
-    idx1, idx2, idx3 = cats .== 1, cats .== 2, cats .== 3
- 
-    # =========================================================================
-    # Panel A — Parity plot
-    # =========================================================================
-    ax1 = Axis(fig[1, 1],
-        xlabel = "True", ylabel = "Predicted",
-        title = "Predicted vs. true",
-        subtitle = @sprintf("MAE = %.4g   RMSE = %.4g   R² = %.4f", mae, rmse, r2),
-        aspect = DataAspect())
- 
-    xband = range(xr[1], xr[2], length = 50)
-    band!(ax1, xband, xband .- mean_std, xband .+ mean_std, color = (c_good, 0.10))
- 
-    errorbars!(ax1, y_true, y_pred, std, std, color = c_err, linewidth = 1, whiskerwidth = 0)
- 
-    scatter!(ax1, y_true[idx1], y_pred[idx1], color = (c_good, 0.65), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| ≤ 1")
-    scatter!(ax1, y_true[idx2], y_pred[idx2], color = (c_mid, 0.75), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "1 < |z| ≤ 2")
-    scatter!(ax1, y_true[idx3], y_pred[idx3], color = (c_bad, 0.85), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| > 2")
- 
-    lines!(ax1, xr, xr, color = c_accent, linestyle = :dash, linewidth = 2)
- 
-    xlims!(ax1, xr...); ylims!(ax1, xr...)
-    axislegend(ax1, position = :rb, labelsize = 12)
- 
-    # =========================================================================
-    # Panel B — Residual distribution vs. predicted noise model
-    # =========================================================================
-    ax2 = Axis(fig[1, 2],
-        xlabel = "Residual (pred − true)", ylabel = "Density",
-        title = "Residual distribution",
-        subtitle = @sprintf("μ = %.4g   σ_res = %.4g   ⟨σ_pred⟩ = %.4g",
-                             Statistics.mean(residuals), Statistics.std(residuals), mean_std))
- 
-    hist!(ax2, residuals, normalization = :pdf, bins = 30,
-          color = (c_accent, 0.15), strokewidth = 1, strokecolor = (c_accent, 0.4))
-    density!(ax2, residuals, color = (:transparent, 0), strokewidth = 2.5,
-             strokecolor = c_accent, label = "Empirical")
- 
-    # theoretical N(0, mean_std) curve implied by the model's own uncertainty
-    xs = range(minimum(residuals), maximum(residuals), length = 200)
-    normal_pdf(x, σ) = exp(-x^2 / (2σ^2)) / (σ * sqrt(2π))
-    lines!(ax2, xs, normal_pdf.(xs, mean_std), color = c_bad, linestyle = :dot,
-           linewidth = 2.5, label = "N(0, ⟨σ_pred⟩)")
- 
-    vlines!(ax2, [0.0], color = :black, linestyle = :dash, linewidth = 1.5)
-    axislegend(ax2, position = :rt, labelsize = 12)
- 
-    # =========================================================================
-    # Panel C — Residuals vs true, with ±1σ / ±2σ bands
-    # =========================================================================
-    ax3 = Axis(fig[2, 1], xlabel = "True", ylabel = "Prediction error", title = "Residuals")
- 
-    band!(ax3, xr, fill(-2mean_std, 2), fill(2mean_std, 2), color = (c_bad, 0.07))
-    band!(ax3, xr, fill(-mean_std, 2),  fill(mean_std, 2),  color = (c_good, 0.12))
- 
-    scatter!(ax3, y_true[idx1], residuals[idx1], color = (c_good, 0.65), markersize = 8)
-    scatter!(ax3, y_true[idx2], residuals[idx2], color = (c_mid, 0.75), markersize = 8)
-    scatter!(ax3, y_true[idx3], residuals[idx3], color = (c_bad, 0.85), markersize = 8)
- 
-    hlines!(ax3, [0.0], color = :black, linestyle = :dash, linewidth = 2)
-    xlims!(ax3, xr...)
- 
-    # =========================================================================
-    # Panel D — Calibration / reliability diagram
-    # =========================================================================
-    ax4 = Axis(fig[2, 2],
-        xlabel = "Nominal confidence level", ylabel = "Empirical coverage",
-        title = "Uncertainty calibration", aspect = DataAspect())
- 
-    levels = 0.05:0.05:0.95
-    observed = [Statistics.mean(abs.(z) .<= norminvcdf(0.5 + p/2)) for p in levels]
-    calib_err = Statistics.mean(abs.(observed .- collect(levels)))
-    ax4.subtitle = @sprintf("Mean calibration error = %.3f", calib_err)
- 
-    lines!(ax4, [0, 1], [0, 1], color = c_accent, linestyle = :dash, linewidth = 2, label = "Perfect calibration")
-    lines!(ax4, collect(levels), observed, color = c_bad, linewidth = 2.5)
-    scatter!(ax4, collect(levels), observed, color = c_bad, markersize = 8, label = "Model")
- 
-    xlims!(ax4, 0, 1); ylims!(ax4, 0, 1)
-    axislegend(ax4, position = :lt, labelsize = 12)
- 
+
+    add_property_panels!(fig, 1, energy, palette, "Ha/atom")
+    add_property_panels!(fig, 2, forces, palette, "Ha/bohr")
+
     rowgap!(fig.layout, 18)
     colgap!(fig.layout, 18)
- 
+
     if !isnothing(save_path)
         save(save_path, fig, px_per_unit = 3)
     end
- 
+
     return fig
 end

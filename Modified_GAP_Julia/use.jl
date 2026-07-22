@@ -23,8 +23,8 @@ Xtest, Ytest, lt = read_data("/Datasets/bcc_dft_26.xyz")
 X = vcat(Xtrain26, Xbcc26, Xtest)
 Y = vcat(Ytrain26, Ybcc26, Ytest)
 
-indx = (e = (p = union(1:ltrain26+lb26), s = []), f = (p = union([]), s = []), v = (p = union([]), s = []) )
-X = X_normalise(X, indx) # Normalise the features
+# indx = (e = (p = union(1:ltrain26+lb26), s = []), f = (p = union([]), s = []), v = (p = union([]), s = []) )
+# X = X_normalise(X, indx) # Normalise the features
 
 
 
@@ -55,7 +55,7 @@ test_e_and_f = (e = (p = test_features, s = []), f = (p = test_features, s = [])
 # Selecting parameters of the regression
 # ============================================================
 
-ζ=2                    # Degree of the polynomial kernel
+ζ=4                   # Degree of the polynomial kernel
 nS = 0                 # Number of secondary tasks
 normalisation = true   # Normalisation of outputs
 
@@ -77,8 +77,6 @@ m, S, K = multitask(
     denorm = false
 )
 V = sqrt.(diag(S)) 
-
-
 
 
 # ============================================================
@@ -117,7 +115,9 @@ println("Force  R²  = ", εforces)
 y_true = truth ./ numbers_of_atoms
 y_pred = E_pred ./ numbers_of_atoms
 
-fig = plot_predictions_pro(y_pred, y_true, std_E; model_name = "GNN-v2")
+include( path*"/tools.jl")
+fig = plot_predictions_pro(y_pred, y_true, std_E, F_pred, forces, std_F; model_name = "GNN-v2")
 
+# save("Nice_plot.png",fig)
 
  

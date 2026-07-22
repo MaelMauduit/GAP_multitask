@@ -5,6 +5,9 @@ struct HyperParams{T}
     σ²e::T
     σ²::Vector{T}
     ϱ::Vector{T}
+    ηe::T
+    ηf::T
+    ηv::T
 end
 
 
@@ -31,24 +34,27 @@ function safe_mean_diag(K_0, range)
     return Statistics.mean(diag(K_0[range, range]))
 end
 
-function get_jitter(h::HyperParams, K_0, Y, train, kept_lines)
-    nS = length(h.ϱ)
-    vect_one = ones(nS)
+function get_jitter(h::HyperParams, K, Y, train, kept_lines)
+    """
+    Must use K[kept_lines,kept_lines] as K. The kept_lines argument is used of 
+    selecting lines, not acting on K.
+    """
     ne, nf, nv = BlockSizes(Y, train)
+
     sort_lines = sort(kept_lines)
     true_ne = length(sort_lines[sort_lines .<= ne])
     true_nf = length(sort_lines[(sort_lines .> ne) .& (sort_lines .<= ne + nf)])
     true_nv = length(sort_lines[sort_lines .> ne + nf])
 
-    Me = safe_mean_diag(K_0, 1:true_ne)
-    Mf = safe_mean_diag(K_0, true_ne+1:true_ne+true_nf)
-    Mv = safe_mean_diag(K_0, true_ne+true_nf+1:true_ne+true_nf+true_nv)
+    Me = safe_mean_diag(K, 1:true_ne)
+    Mf = safe_mean_diag(K, true_ne+1:true_ne+true_nf)
+    Mv = safe_mean_diag(K, true_ne+true_nf+1:true_ne+true_nf+true_nv)
 
-    ηe = 1e-9 * Me 
-    ηf = 1e-6 * Mf 
-    ηv = 1e-6 * Mv 
-    η  = ( e=( p=ηe, s=ηe * vect_one ), f=( p=ηf, s=ηf * vect_one ), v=( p=ηv, s=ηv * vect_one ))
-    return η
+    ηe = max(1e-9 * Me, 1e-3 * h.ηe)
+    ηf = max(1e-6 * Mf, 1e-3 * h.ηf)
+    ηv = max(1e-6 * Mv, 1e-3 * h.ηv)
+    jitter = ((true_ne,ηe) , (true_nf,ηf) , (true_nv,ηv))
+    return jitter
 end
 
 function full_matrix(h::HyperParams, C::CovMatrices, Y, train, kept_lines)
@@ -56,17 +62,19 @@ function full_matrix(h::HyperParams, C::CovMatrices, Y, train, kept_lines)
     vect_one = ones(nS)
     σ² = ( e=( p=h.σ²e, s=h.σ² ), f=( p=h.σ²e, s=h.σ² ), v=( p=h.σ²e, s=h.σ² ))
     ϱ  = ( e=h.ϱ, f=h.ϱ, v=h.ϱ ) #Be careful, rho has to be the same for e,f and v by linearity
-    ηe = 0
-    η  = ( e=( p=ηe, s=ηe * vect_one ), f=( p=ηe, s=ηe * vect_one ), v=( p=ηe, s=ηe * vect_one ))
-    K_0 = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true)
-    K_0 = K_0[kept_lines, kept_lines]
-    η  = get_jitter(h, K_0, Y, train, kept_lines)
+    η  = ( e=( p=h.ηe, s=h.ηe * vect_one ), f=( p=h.ηf, s=h.ηf * vect_one ), v=( p=h.ηv, s=h.ηv * vect_one ))
 
     K = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true)
     K = K[kept_lines, kept_lines]
-    # print("Me = ", Me, ", Mf = ", Mf, ", Mv = ", Mv)
-    # print("cond(K) = ", cond(K), ", cond(K1) = ", cond(K1))
-    Cho = cholesky(K)
+
+    jitter  = get_jitter(h, K, Y, train, kept_lines)
+    ne, ηe = jitter[1]
+    nf, ηf = jitter[2]
+    nv, ηv = jitter[3]
+
+    D = Diagonal(vcat(fill(ηe, ne), fill(ηf, nf), fill(ηv, nv)))
+
+    Cho = cholesky(K + D)
     return Cho
 end
 
@@ -80,11 +88,11 @@ function nll(lh, C::CovMatrices, y, number_of_tasks, Y, train, kept_lines)
         σ² = 10 .^lh[2:1+number_of_tasks]
         ϱ = 10 .^lh[number_of_tasks+2:2*number_of_tasks+1]
     end
-    # ηe = 10^lh[2*nS+2]
-    # ηf = 10^lh[2*nS+3]
-    # ηv = 10^lh[2*nS+4]
+    ηe = 10^lh[2*number_of_tasks+2]
+    ηf = 10^lh[2*number_of_tasks+3]
+    ηv = 10^lh[2*number_of_tasks+4]
 
-    h = HyperParams(σ²e, σ², ϱ)  
+    h = HyperParams(σ²e, σ², ϱ, ηe, ηf, ηv)  
     y = y[kept_lines] 
     try
         Cho = full_matrix(h, C, Y, train, kept_lines)
@@ -98,12 +106,12 @@ end
 
 
 function optim(C::CovMatrices, Y, y, nS, train, kept_lines)
-    w = 2*nS + 1
+    w = 2*nS + 4
     f(lh) = nll(vcat(lh), C, y, nS, Y, train, kept_lines)
 
     lower = fill(-8.0, w)
     upper = fill(8.0, w)
-    p0 = vcat([-0], fill(-4., nS), fill(0., nS))
+    p0 = vcat([-0.], fill(-4., nS), fill(0., nS), [-7., -5., -5.])
 
     result = optimize(
         f,
@@ -146,23 +154,15 @@ end
 
 function Global_optimizer(X, Y, train, kept_lines, number_of_tasks,  normalisation = false, ζ = 4) 
     Ce, Cf, Cv, Cfe, Cve, Cvf = construct_matrices(X, train, ζ)
-    vect_one = ones(number_of_tasks)
     C = CovMatrices(Ce, Cf, Cv, Cfe, Cve, Cvf)
+
     y, _, _ = select_observations(X, Y, train, normalisation)
     # print("OBSERVATIONS", y, "OK END")
-
-
     result = optim(C, Y, y, number_of_tasks, train, kept_lines)
     res = Optim.minimizer(result)
     nll_val = Optim.minimum(result)
     println("The optimisation obtained the nll value ", nll_val, " thanks to the parameters ", res, "with a final gradient of ")
-    
-    σ², ϱ, η = construct_hyperparam(vcat(res, [log10(1e-15), log10(1e-15), log10(1e-15)]), number_of_tasks)
-    ηe = 0
-    η  = ( e=( p=ηe, s=ηe * vect_one ), f=( p=ηe, s=ηe * vect_one ), v=( p=ηe, s=ηe * vect_one ))
-    K_0 = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true)
-    h = HyperParams(σ².e.p, σ².e.s, ϱ.e)
-    η  = get_jitter(h, K_0, Y, train, kept_lines)
-    return σ², ϱ, η
+    σ², ϱ, η = construct_hyperparam(res, number_of_tasks)
 
+    return σ², ϱ, η
 end
