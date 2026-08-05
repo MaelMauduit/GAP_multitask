@@ -1,6 +1,6 @@
 using Printf
 using GLMakie
-function read_data(file; r_cut=10.0, n_max=10, l_max=8, sigma=0.5)
+function read_data(file; r_cut=8.0, n_max=12, l_max=8, sigma=0.4)
     desc = SOAPDescriptor(
         species=["Si"],
         r_cut=r_cut,
@@ -25,10 +25,13 @@ end
 
 function plot_result(
     m,
-    Var,
+    std,
     truth,
     volume,
-    interpolating_points,
+    nb_pred,
+    training_points,
+    training_volumes,
+    nb_train,
     epsilon;
     hyperparams=nothing,
     savedir=nothing
@@ -57,14 +60,16 @@ function plot_result(
     )
 
     pred_color = :dodgerblue3
-
-    if Var !== nothing
-        σ = sqrt.(Var)
+    volume = volume ./ nb_pred
+    m = m ./ nb_pred
+    truth = truth ./ nb_pred
+    if std !== nothing
+        std = std ./ nb_pred
         band!(
             ax,
             volume,
-            m .- σ,
-            m .+ σ,
+            m .- std,
+            m .+ std,
             color = (pred_color, 0.12)
         )
     end
@@ -73,18 +78,20 @@ function plot_result(
     scatter!(ax, volume, truth, color=:forestgreen, markersize=8)
 
     lines!(ax, volume, m, color=pred_color, linewidth=3, linestyle=:dash, label="Prediction")
-
-    scatter!(
-        ax,
-        volume[interpolating_points],
-        truth[interpolating_points],
-        color=:darkorange,
-        marker=:diamond,
-        markersize=14,
-        strokecolor=:black,
-        strokewidth=1,
-        label="Training"
-    )
+    
+    if !isempty(training_points)
+        scatter!(
+            ax,
+            training_volumes ./ nb_train,
+            training_points ./ nb_train,
+            color=:darkorange,
+            marker=:diamond,
+            markersize=14,
+            strokecolor=:black,
+            strokewidth=1,
+            label="Training"
+        )
+    end
 
     axislegend(
         ax,
@@ -93,8 +100,6 @@ function plot_result(
         backgroundcolor=(:white, 0.9)
     )
 
-    display(fig)
-
     if savedir !== nothing
         save(savedir * ".png", fig, px_per_unit=3)
     end
@@ -102,31 +107,70 @@ function plot_result(
     return fig
 end
 
-function pseudo_distance(A,B)
-    distance = Inf
-    for a in eachrow(A) 
-        for b in eachrow(B)
-            d = norm(a-b, 2)
-            distance = min(distance, d)
-        end
+function Mahalanobis_distance(R, V)
+    μ = Statistics.mean(R, dims=1)
+    S = Statistics.cov(R, dims=1)
+
+    Sinv = pinv(S)
+
+    distances = []
+
+    for i in 1:size(V,1)
+        x = V[i, :] .- vec(μ)
+        d = sqrt(x' * Sinv * x)
+        push!(distances, d)
     end
-    return distance
+
+    return Statistics.mean(distances)
 end
 
-function fps(X, n_select)
-    if length(X) <= 5
-        println("The number of configurations is less than 5, returning all configurations")
-        return 1:length(X)
+function angular_distance(a,b)
+    ps = dot(a,b)
+    if isapprox(ps, 1; atol=1e-8)
+        ps = 1.0
     end
+    if isapprox(ps, -1; atol=1e-8)
+        ps = -1.0
+    end
+    return acos(ps)
+end
+
+function L2_distance(a,b)
+    return norm(a-b)
+end
+
+function Hausdorff(A,B; distance_metric = angular_distance)
+    ab = 0
+    ba = 0
+    for a in eachrow(A) 
+        distance = Inf
+        for b in eachrow(B)
+            d = distance_metric(a,b)
+            distance = min(distance, d)
+        end
+        ab = max(ab, distance)
+    end
+    for b in eachrow(B) 
+        distance = Inf
+        for a in eachrow(A)
+            d = distance_metric(a,b)
+            distance = min(distance, d)
+        end
+        ba = max(ba, distance)
+    end
+    return max(ab, ba)
+end
+function fps(X, n_select; distance_metric = angular_distance)
     if n_select > length(X)
         println("The number of configurations to select is greater than the number of configurations, returning all ", length(X), " configurations")
         return 1:length(X)
     end
+
     keys = 1:length(X)
-    selected = randperm(length(X))[1:5]
+    selected = randperm(length(X))[1:1]
     D = vcat((X[k][3] for k in selected)...)
     remaining = setdiff(keys, selected)
-    distance_vector = [pseudo_distance(D, X[k][3]) for k in remaining]
+    distance_vector = [Hausdorff(D, X[k][3]; distance_metric=distance_metric) for k in remaining]
 
     while length(selected) < n_select
         maximum_value, pos = maximum(distance_vector), argmax(distance_vector)
@@ -135,9 +179,9 @@ function fps(X, n_select)
         push!(selected, max_index)
         remaining = deleteat!(remaining, pos)
         D = vcat(D, X[max_index][3])
-        distance_vector = deleteat!(distance_vector, pos)
-        distance_vector = [min(pseudo_distance(X[max_index][3], X[remaining[k]][3]), distance_vector[k]) for k in 1:length(remaining)]
+        distance_vector = [Hausdorff(D, X[k][3]; distance_metric=distance_metric) for k in remaining]
     end
+
     println(length(selected), " configurations selected out of ", length(X))
     return selected
 end
@@ -208,7 +252,7 @@ function create_filter_cov_raw(X,train,nS)
     return kept_lines
 end
 
-function extract_full_rank_submatrix(K::AbstractMatrix; rtol=1e-8, verbose=true)
+function extract_full_rank_submatrix(Y, train, K::AbstractMatrix; rtol=1e-8, verbose=true)
     n = size(K)[1]
     
     F = qr(K, ColumnNorm())        # RRQR: pivots ordered by information content
@@ -222,19 +266,45 @@ function extract_full_rank_submatrix(K::AbstractMatrix; rtol=1e-8, verbose=true)
         println("QR-pivoted rank = ", r, " / ", n, "  (dropped ", n - r, " indices)")
     end
 
+    ne, nf, nv = BlockSizes(Y, train)
+    sort_lines = sort(kept)
+
+    true_ne = length(sort_lines[sort_lines .<= ne])
+    println("We have kept ", true_ne, " values of energy over the ", ne, " available")
+
     return kept
 end
 
-function create_filter_cov(X,train,nS,ζ)
+function create_filter_cov(X, Y, train, nS, ζ; only_K=false)
     # careful, may be an issue with multitask as sigma is ill calibrated. Fix the selection in this case.
     vect_one = ones(nS)
     σ² = (e = (p = 1.0, s = 1. * vect_one), f = (p = 1.0, s = 1. * vect_one), v = (p = 1.0, s = 1.0 * vect_one)) 
     η = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
     ϱ = (e = 1.0 .* ones(nS), f = 1.0 .* ones(nS), v = 1.0 .* ones(nS))
     K_no_hyper = construct_covariance(X, train, σ², ϱ, η, true, ζ)
-    kept_lines = extract_full_rank_submatrix(K_no_hyper)
+    if isempty(K_no_hyper)
+        return []
+    end
+    kept_lines = extract_full_rank_submatrix(Y, train, K_no_hyper)
+    if only_K
+        return K_no_hyper, kept_lines
+    end
     return kept_lines
 end
+
+function create_filter_cov_decoupled(X, Y, train, nS, ζ; only_K=false)
+    vect_empty = [Float64[] for _ in 1:nS]
+    train_e = (e = (p = train.e.p, s = train.e.s), f = (p = [], s = vect_empty), v = (p = [], s = vect_empty) )
+    train_f = (e = (p = [], s = vect_empty), f = (p = train.f.p, s = train.f.s), v = (p = [], s = vect_empty) )
+    kept_lines_e = create_filter_cov(X, Y, train_e, nS, 4)
+    kept_lines_f = create_filter_cov(X, Y, train_f, nS, 4)
+    ne, nf, nv = BlockSizes(Y, train)
+    kept_lines_f = kept_lines_f .+ ne
+    kept_lines_tot = union(kept_lines_e, kept_lines_f)
+    println("We have kept ", length(kept_lines_tot), " data over the ", ne+nf+nv, " available")
+    return kept_lines_tot
+end
+
 
 function plot_eigenvalues(K)
     λK  = eigvals(Symmetric(K))
@@ -245,45 +315,6 @@ function plot_eigenvalues(K)
     axislegend(ax, position=:rb)
     fig
 end
-
-function plot_predictions(y_pred, y_true, std, number_of_atoms = nothing)
-    @assert length(y_true) == length(y_pred) "y_true and y_pred must have equal length"
-    y_true = abs.(y_true)
-    y_pred = abs.(y_pred)
-    if  !isnothing(number_of_atoms)
-        y_true = y_true ./ number_of_atoms
-        y_pred = y_pred ./ number_of_atoms
-    end
-
-    fig = Figure()
-    ax = Axis(fig[1, 1],
-        xlabel = "True",
-        ylabel = "Predicted",
-        title = "Predicted vs True")
-
-    lo, hi = extrema(vcat(y_true, y_pred))
-    pad = 0.05 * (hi - lo)
-
-    scatter!(ax, y_true, y_pred, color = (:steelblue, 0.6), markersize = 8, label = "predictions")
-    lines!(ax, [lo - pad, hi + pad], [lo - pad, hi + pad],
-        color = :black, linestyle = :dash, linewidth = 2, label = "y = x")
-    errorbars!(
-        ax,
-        y_true,
-        y_pred .- std,
-        y_pred .+ std,
-        color = :steelblue,
-        linestyle = :dash
-    )
-    xlims!(ax, lo - pad, hi + pad)
-    ylims!(ax, lo - pad, hi + pad)
-    axislegend(ax, position = :rb)
-
-    fig
-end
-
-
-
 
 
 # ==============================================================================
@@ -514,4 +545,32 @@ function plot_predictions_pro(e_pred, e_true, std, f_pred, f_true, std_f;
     end
 
     return fig
+end
+
+
+function Schur_complement(K11inv, K12, K22)
+    return K22 - K12' * K11inv * K12
+end
+
+function Schur_inversion(K11, K12, K22)
+    L11 = cholesky(K11)
+    Kinv = inv(L11)
+    S = Schur_complement(Kinv, K12, K22)
+    Ls = cholesky(Symmetric(S))
+    Sinv = inv(Ls)
+    KinvK12 = Kinv * K12
+    TL = Kinv + KinvK12 * Sinv * KinvK12'
+    TR = -KinvK12 * Sinv
+
+
+    n = size(K11, 1)
+    m = size(K22, 1)
+
+    Kglob_inv = Matrix{Float64}(undef, n + m, n + m)
+    Kglob_inv[1:n,     1:n]     .= TL
+    Kglob_inv[1:n,     n+1:end] .= TR
+    Kglob_inv[n+1:end, 1:n]     .= TR'
+    Kglob_inv[n+1:end, n+1:end] .= Sinv
+ 
+    return Kglob_inv
 end

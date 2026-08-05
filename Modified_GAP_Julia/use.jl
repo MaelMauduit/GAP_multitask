@@ -5,9 +5,8 @@ using GLMakie
 
 path  = @__DIR__
 
-include( path*"/multitask.jl")
-include( path*"/optimise.jl")
-include( path*"/tools.jl")
+include( path*"/multitask2.jl")
+
 
 
 
@@ -33,24 +32,23 @@ Y = vcat(Ytrain26, Ybcc26, Ytest)
 # Selecting train and validation datasets
 # ============================================================
 
-# idx = shuffle(1:ltrain26)
+idx = shuffle(1:ltrain26)
 
-# train_features = idx[1:(3*ltrain26) ÷ 4]
+train_features = idx[1:(3*ltrain26) ÷ 4]
 # test_features = idx[((3*ltrain26) ÷ 4) + 1:end]
 
-train_features = fps(X[1:ltrain26], (3*ltrain26)//4)
-test_features = setdiff(1:ltrain26, train_features)
+# train_features = fps(X[1:ltrain26], (2*ltrain26)//3)
+test_features = ltrain26+lb26+1:ltrain26+lb26+lt
 
-train = (e = (p = union(train_features), s = []), v = (p = [], s = []), f = (p = train_features, s = []))
+train_features = union(train_features, test_features[20:25])
+
+train = (e = (p = train_features, s = []), f = (p = [], s = []), v = (p = [], s = []))
+# train = (e = (p = union(train_features, test_features[20:25]), s = []), f = (p = [], s = []), v = (p = [], s = []))
 # train = (e = (p = union(bcc_features, test_features[1]), s = []), f = (p = [], s = []), v = (p = [], s = []))
 
 test_e = (e = (p = test_features, s = []), f = (p = [], s = []), v = (p = [], s = []) )
 test_f = (e = (p = [], s = []), f = (p = test_features, s = []), v = (p = [], s = []) )
 test_e_and_f = (e = (p = test_features, s = []), f = (p = test_features, s = []), v = (p = [], s = []) )
-
-
-
-
 # ============================================================
 # Selecting parameters of the regression
 # ============================================================
@@ -70,20 +68,22 @@ println("========================================")
 println("RUN 1: denorm = false (normalized space)")
 println("========================================")
 
-m, S, K = multitask(
-    X, Y, train, test_e_and_f, 0;
-    ζ = ζ,
-    normalisation = normalisation,
-    denorm = false
-)
+training_points, mean, std = select_observations(X, Y, train, true)
+
+σ² = ( e=( p=16, s=[] ), f=( p=1, s=[] ), v=( p=1, s=[] ))
+η  = ( e=( p=1e-8, s=[] ), f=( p=6, s=[] ), v=( p=0.01, s=[] ))
+ϱ  = ( e=[], f=[], v=[] ) 
+
+K, kept_lines, data, σ², ϱ, η, mean_for_1_atom, std_for_1_atom = train_model(X, Y, train, 0; estimator = "nll", ζ=4, normalisation=normalisation, hyper = (σ², ϱ, η))
+m, S, K = multitask(X, train, test_e_and_f, K, kept_lines, data, σ², ϱ, η, mean_for_1_atom, std_for_1_atom; ζ=4, normalisation=normalisation, denorm = false)
+
 V = sqrt.(diag(S)) 
 
 
 # ============================================================
 # Studying the results
 # ============================================================
-
-_, mean, std = select_observations(X, Y, train, true)
+training_points, mean, std = select_observations(X, Y, train, true)
 truth, _, _  = select_observations(X, Y, test_e, true, mean, std)
 truth = truth .*std
 
@@ -94,12 +94,8 @@ std_E = V[1:length(test_features)] .*std
 F_pred = m[length(test_features)+1:end] .*std
 std_F = V[length(test_features)+1:end] .*std
 
-
 # Need the number of atoms to normalize the contribution.
-numbers_of_atoms = [ size(X[i][3])[1] for i in test_e_and_f.e.p ]            
-for s in test_e_and_f.e.s
-    append!(numbers_of_atoms, [ size(X[i][3])[1] for i in s ])
-end
+nb = numbers_of_atoms_energy(X, test_e)
 
 # plot_predictions(E_pred, truth, std_E, numbers_of_atoms)
 # plot_predictions(F_pred, forces)
@@ -107,17 +103,44 @@ end
 
 
 ε       = r2(E_pred, truth)
-εforces = r2(F_pred, forces)
+εforces = rmse(F_pred, forces)
 
 println("Energy R²  = ", ε)
 println("Force  R²  = ", εforces)
 
-y_true = truth ./ numbers_of_atoms
-y_pred = E_pred ./ numbers_of_atoms
+y_true = truth 
+y_pred = E_pred 
 
-include( path*"/tools.jl")
 fig = plot_predictions_pro(y_pred, y_true, std_E, F_pred, forces, std_F; model_name = "GNN-v2")
+fig
+y_true
+volume = vcat((Y[k].volume for k in test_features)...)
 
-# save("Nice_plot.png",fig)
+train_plot = (e = (p = test_features[20:25], s = []), f = (p = [], s = []), v = (p = [], s = []))
+nb_train = numbers_of_atoms_energy(X, train_plot)
 
- 
+extra_train = test_features[20:25]
+
+idx_plot_train = findall(x -> x in extra_train, train.e.p)
+
+training_points = training_points[idx_plot_train] .* std
+train_volume = vcat((Y[k].volume for k in extra_train)...)
+
+fig2 = plot_result(y_pred, std_E, y_true, volume, nb.p, training_points, train_volume , nb_train.p, ε)
+
+# save("3.forces.png",fig2)
+# save("4.energies.png",fig2)
+
+
+# training_points = training_points .* std
+# train_volume = vcat((Y[k].volume for k in train_features)...)
+# numbers_of_atoms_train = [size(X[i][3])[1] for i in train.e.p]
+# for s in train.e.s
+#     append!(numbers_of_atoms_train, [size(X[i][3])[1] for i in s])
+# end
+# training_points = training_points[1:1:length(train_features)] ./ numbers_of_atoms_train
+
+# plot_result(y_pred, std_E, y_true, volume, [], [] , ε)
+
+
+
