@@ -1,6 +1,6 @@
 using Printf
 using GLMakie
-function read_data(file; r_cut=8.0, n_max=12, l_max=8, sigma=0.4)
+function read_data(file; r_cut=8.0, n_max=10, l_max=8, sigma=0.5)
     desc = SOAPDescriptor(
         species=["Si"],
         r_cut=r_cut,
@@ -22,6 +22,23 @@ function read_data(file; r_cut=8.0, n_max=12, l_max=8, sigma=0.4)
     for c in configs ]
     return X,Y,l
 end
+
+function r2(m, truth)
+    ss_res = sum((m .- truth).^2)
+    ss_tot = sum((truth .- Statistics.mean(truth)).^2)
+    return 1 - ss_res / ss_tot
+end
+
+function rmse(y_true, y_pred, nb_atom=nothing)
+    if nb_atom === nothing
+        println("⚠️ nb_atom absent → utilisation de 1 pour tous les éléments.")
+        nb_atom = ones(length(y_true))
+    end
+
+    return sqrt(Statistics.mean(((y_true .- y_pred) ./ nb_atom).^2))
+end
+
+rmse_relative(y_true, y_pred) = sqrt(Statistics.mean(((y_true .- y_pred).^2) ./ max.(abs.(y_true), 1e-8).^2))
 
 function plot_result(
     m,
@@ -51,8 +68,8 @@ function plot_result(
 
     ax = Axis(
         fig[1,1],
-        xlabel = "Volume (Å³)",
-        ylabel = "Energy (eV)",
+        xlabel = "Volume (Bohr³)",
+        ylabel = "Energy (Ha)",
         title = title_str,
         titlesize = 24,
         xlabelsize = 18,
@@ -86,7 +103,7 @@ function plot_result(
             training_points ./ nb_train,
             color=:darkorange,
             marker=:diamond,
-            markersize=14,
+            markersize=60,
             strokecolor=:black,
             strokewidth=1,
             label="Training"
@@ -139,7 +156,7 @@ function L2_distance(a,b)
     return norm(a-b)
 end
 
-function Hausdorff(A,B; distance_metric = angular_distance)
+function Hausdorff(A, B; distance_metric = angular_distance)
     ab = 0
     ba = 0
     for a in eachrow(A) 
@@ -160,17 +177,27 @@ function Hausdorff(A,B; distance_metric = angular_distance)
     end
     return max(ab, ba)
 end
+
+
 function fps(X, n_select; distance_metric = angular_distance)
     if n_select > length(X)
         println("The number of configurations to select is greater than the number of configurations, returning all ", length(X), " configurations")
         return 1:length(X)
     end
 
+    if n_select == 0
+        println("No points have been selected, as required")
+        return Int64[]
+    end
+
     keys = 1:length(X)
     selected = randperm(length(X))[1:1]
     D = vcat((X[k][3] for k in selected)...)
     remaining = setdiff(keys, selected)
-    distance_vector = [Hausdorff(D, X[k][3]; distance_metric=distance_metric) for k in remaining]
+    distance_vector = [minimum(
+                        Hausdorff(X[s][3], X[k][3]; distance_metric=distance_metric)
+                        for s in selected
+                    ) for k in remaining]
 
     while length(selected) < n_select
         maximum_value, pos = maximum(distance_vector), argmax(distance_vector)
@@ -179,7 +206,10 @@ function fps(X, n_select; distance_metric = angular_distance)
         push!(selected, max_index)
         remaining = deleteat!(remaining, pos)
         D = vcat(D, X[max_index][3])
-        distance_vector = [Hausdorff(D, X[k][3]; distance_metric=distance_metric) for k in remaining]
+        distance_vector = [minimum(
+                        Hausdorff(X[s][3], X[k][3]; distance_metric=distance_metric)
+                        for s in selected
+                    ) for k in remaining]
     end
 
     println(length(selected), " configurations selected out of ", length(X))
@@ -243,8 +273,8 @@ end
 
 function create_filter_cov_raw(X,train,nS)
     # careful, may be an issue with multitask as sigma is ill calibrated. Fix the selection in this case.
-    vect_one = ones(nS)
-    σ² = (e = (p = 1.0, s = 1. * vect_one), f = (p = 1.0, s = 1. * vect_one), v = (p = 1.0, s = 1.0 * vect_one)) 
+    vect = [1.0 for _ in 1:nS]
+    σ² = (e = (p = 1.0, s = 1. * vect), f = (p = 1.0, s = 1. * vect), v = (p = 1.0, s = 1.0 * vect)) 
     η = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
     ϱ = (e = 1.0 .* ones(nS), f = 1.0 .* ones(nS), v = 1.0 .* ones(nS))
     K_no_hyper = construct_covariance(X, train, σ², ϱ, η, true, ζ)
@@ -252,7 +282,7 @@ function create_filter_cov_raw(X,train,nS)
     return kept_lines
 end
 
-function extract_full_rank_submatrix(Y, train, K::AbstractMatrix; rtol=1e-8, verbose=true)
+function extract_full_rank_submatrix(Y, train, K::AbstractMatrix, rtol=1e-8; verbose=true)
     n = size(K)[1]
     
     F = qr(K, ColumnNorm())        # RRQR: pivots ordered by information content
@@ -275,17 +305,18 @@ function extract_full_rank_submatrix(Y, train, K::AbstractMatrix; rtol=1e-8, ver
     return kept
 end
 
-function create_filter_cov(X, Y, train, nS, ζ; only_K=false)
+function create_filter_cov(X, Y, train, nS, ζ, rtol; only_K=false)
     # careful, may be an issue with multitask as sigma is ill calibrated. Fix the selection in this case.
-    vect_one = ones(nS)
-    σ² = (e = (p = 1.0, s = 1. * vect_one), f = (p = 1.0, s = 1. * vect_one), v = (p = 1.0, s = 1.0 * vect_one)) 
+    vect = [1.0 * k for k in 1:nS]
+    σ² = (e = (p = 1.0, s = vect), f = (p = 1.0, s = vect), v = (p = 1.0, s = vect)) 
     η = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
     ϱ = (e = 1.0 .* ones(nS), f = 1.0 .* ones(nS), v = 1.0 .* ones(nS))
+    println(train, σ², ϱ, η)
     K_no_hyper = construct_covariance(X, train, σ², ϱ, η, true, ζ)
     if isempty(K_no_hyper)
         return []
     end
-    kept_lines = extract_full_rank_submatrix(Y, train, K_no_hyper)
+    kept_lines = extract_full_rank_submatrix(Y, train, K_no_hyper, rtol)
     if only_K
         return K_no_hyper, kept_lines
     end
@@ -296,8 +327,8 @@ function create_filter_cov_decoupled(X, Y, train, nS, ζ; only_K=false)
     vect_empty = [Float64[] for _ in 1:nS]
     train_e = (e = (p = train.e.p, s = train.e.s), f = (p = [], s = vect_empty), v = (p = [], s = vect_empty) )
     train_f = (e = (p = [], s = vect_empty), f = (p = train.f.p, s = train.f.s), v = (p = [], s = vect_empty) )
-    kept_lines_e = create_filter_cov(X, Y, train_e, nS, 4)
-    kept_lines_f = create_filter_cov(X, Y, train_f, nS, 4)
+    kept_lines_e = create_filter_cov(X, Y, train_e, nS, ζ, 1e-8)
+    kept_lines_f = create_filter_cov(X, Y, train_f, nS, ζ, 1e-8)
     ne, nf, nv = BlockSizes(Y, train)
     kept_lines_f = kept_lines_f .+ ne
     kept_lines_tot = union(kept_lines_e, kept_lines_f)
@@ -424,35 +455,35 @@ function add_property_panels!(fig, col::Int, pd::PropertyDiag, palette, unit::St
     idx1, idx2, idx3 = cats .== 1, cats .== 2, cats .== 3
     @assert length(idx1) == n "internal error: index mask length ($(length(idx1))) != $(pd.label) data length ($n)"
 
-    # ---- Row 1: parity plot -------------------------------------------------
-    ax1 = Axis(fig[1, col], xlabel = "True ($unit)", ylabel = "Predicted ($unit)",
-        title = "Predicted vs. true ($(pd.label))",
-        subtitle = @sprintf("MAE = %.4g   RMSE = %.4g   R² = %.4f   (N=%d)", pd.mae, pd.rmse, pd.r2, n),
-        aspect = DataAspect())
+    # # ---- Row 1: parity plot -------------------------------------------------
+    # ax1 = Axis(fig[1, col], xlabel = "True ($unit)", ylabel = "Predicted ($unit)",
+    #     title = "Predicted vs. true ($(pd.label))",
+    #     subtitle = @sprintf("RMSE = %.4g   ", pd.rmse),
+    #     aspect = DataAspect())
 
-    errorbars!(ax1, pd.ytrue, pd.ypred, pd.sigma, pd.sigma, color = c_err, linewidth = 1, whiskerwidth = 0)
-    scatter!(ax1, pd.ytrue[idx1], pd.ypred[idx1], color = (c_good, 0.65), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| ≤ 1")
-    scatter!(ax1, pd.ytrue[idx2], pd.ypred[idx2], color = (c_mid, 0.75), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "1 < |z| ≤ 2")
-    scatter!(ax1, pd.ytrue[idx3], pd.ypred[idx3], color = (c_bad, 0.85), markersize = 9,
-             strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| > 2")
-    lines!(ax1, pd.xr, pd.xr, color = c_accent, linestyle = :dash, linewidth = 2)
-    xlims!(ax1, pd.xr...); ylims!(ax1, pd.xr...)
-    axislegend(ax1, position = :rb, labelsize = 12)
+    # errorbars!(ax1, pd.ytrue, pd.ypred, pd.sigma, pd.sigma, color = c_err, linewidth = 1, whiskerwidth = 0)
+    # scatter!(ax1, pd.ytrue[idx1], pd.ypred[idx1], color = (c_good, 0.65), markersize = 9,
+    #          strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| ≤ 1")
+    # scatter!(ax1, pd.ytrue[idx2], pd.ypred[idx2], color = (c_mid, 0.75), markersize = 9,
+    #          strokewidth = 0.5, strokecolor = (:white, 0.6), label = "1 < |z| ≤ 2")
+    # scatter!(ax1, pd.ytrue[idx3], pd.ypred[idx3], color = (c_bad, 0.85), markersize = 9,
+    #          strokewidth = 0.5, strokecolor = (:white, 0.6), label = "|z| > 2")
+    # lines!(ax1, pd.xr, pd.xr, color = c_accent, linestyle = :dash, linewidth = 2)
+    # xlims!(ax1, pd.xr...); ylims!(ax1, pd.xr...)
+    # axislegend(ax1, position = :rb, labelsize = 15)
 
-    # ---- Row 2: residuals vs. true ------------------------------------------
-    ax3 = Axis(fig[2, col], xlabel = "True ($unit)", ylabel = "Prediction error ($unit)",
-        title = "Residuals ($(pd.label))")
+    # # ---- Row 2: residuals vs. true ------------------------------------------
+    # ax3 = Axis(fig[2, col], xlabel = "True ($unit)", ylabel = "Prediction error ($unit)",
+    #     title = "Residuals ($(pd.label))")
 
-    scatter!(ax3, pd.ytrue[idx1], pd.resid[idx1], color = (c_good, 0.65), markersize = 8)
-    scatter!(ax3, pd.ytrue[idx2], pd.resid[idx2], color = (c_mid, 0.75), markersize = 8)
-    scatter!(ax3, pd.ytrue[idx3], pd.resid[idx3], color = (c_bad, 0.85), markersize = 8)
-    hlines!(ax3, [0.0], color = :black, linestyle = :dash, linewidth = 2)
-    xlims!(ax3, pd.xr...)
+    # scatter!(ax3, pd.ytrue[idx1], pd.resid[idx1], color = (c_good, 0.65), markersize = 8)
+    # scatter!(ax3, pd.ytrue[idx2], pd.resid[idx2], color = (c_mid, 0.75), markersize = 8)
+    # scatter!(ax3, pd.ytrue[idx3], pd.resid[idx3], color = (c_bad, 0.85), markersize = 8)
+    # hlines!(ax3, [0.0], color = :black, linestyle = :dash, linewidth = 2)
+    # xlims!(ax3, pd.xr...)
 
     # ---- Row 3: calibration / reliability, with Wilson sampling-noise band --
-    ax4 = Axis(fig[3, col], xlabel = "Nominal confidence level", ylabel = "Empirical coverage",
+    ax4 = Axis(fig[1, col], xlabel = "Nominal confidence level", ylabel = "Empirical coverage",
         title = "Uncertainty calibration ($(pd.label))", aspect = DataAspect())
 
     levels = collect(union(0.05:0.05:0.95,0.99))
@@ -464,7 +495,7 @@ function add_property_panels!(fig, col::Int, pd::PropertyDiag, palette, unit::St
     lines!(ax4, levels, observed, color = c_bad, linewidth = 2.5)
     scatter!(ax4, levels, observed, color = c_bad, markersize = 8, label = "Model")
     xlims!(ax4, 0, 1); ylims!(ax4, 0, 1)
-    axislegend(ax4, position = :lt, labelsize = 11)
+    axislegend(ax4, position = :lt, labelsize = 15)
 
     return nothing
 end
@@ -492,16 +523,20 @@ energies and forces respectively. `e_*` and `f_*` may have different lengths
 (e.g. one energy per structure vs. three force components per atom) — each
 property is validated and plotted independently.
 """
-function plot_predictions_pro(e_pred, e_true, std, f_pred, f_true, std_f;
+function plot_predictions_pro(e_pred, e_true, std, f_pred = nothing, f_true = nothing, std_f = nothing;
                                model_name::String = "", save_path::Union{Nothing,String} = nothing)
 
     energy = PropertyDiag("energy", e_true, e_pred, std)
-    forces = PropertyDiag("forces", f_true, f_pred, std_f)
+    if f_pred === nothing || f_true === nothing || std_f === nothing
+        forces = nothing
+    else
+        forces = PropertyDiag("forces", f_true, f_pred, std_f)
+    end
 
     # -------------------------------------------------------------------------
     # Palette & theme — clean "editorial" look
     # -------------------------------------------------------------------------
-    c_bg     = "#FBFBFD"
+    c_bg     = :white
     c_grid   = "#E7E9EE"
     c_accent = "#264653"   # slate, used for diagonal / reference lines
     c_good   = "#2A9D8F"   # teal    -> |z| <= 1
@@ -512,30 +547,43 @@ function plot_predictions_pro(e_pred, e_true, std, f_pred, f_true, std_f;
                 c_good = c_good, c_mid = c_mid, c_bad = c_bad, c_err = c_err)
 
     set_theme!(Theme(
-        fontsize = 15,
+        fontsize = 18,
         font = "TeX Gyre Heros Makie",
         Axis = (
-            backgroundcolor = c_bg,
+            # backgroundcolor = c_bg,
             xgridcolor = c_grid, ygridcolor = c_grid,
             xgridwidth = 1, ygridwidth = 1,
             topspinevisible = false, rightspinevisible = false,
             titlefont = "TeX Gyre Heros Bold Makie",
-            titlesize = 16,
+            titlesize = 19,
             subtitlefont = "TeX Gyre Heros Makie",
-            subtitlesize = 13,
+            subtitlesize = 17,
             subtitlecolor = (:black, 0.6),
         ),
         Legend = (framevisible = true, backgroundcolor = (:white, 0.8), padding = (8,8,8,8)),
     ))
 
-    fig = Figure(size = (1250, 1500), backgroundcolor = c_bg)
+    if isnothing(forces)
+        fig = Figure(size = (750, 1500))
+    else
+        fig = Figure(size = (1100, 700))
+    end
 
-    Label(fig[0, 1:2],
-        isempty(model_name) ? "Model performance diagnostics" : "Model performance diagnostics — $model_name",
-        fontsize = 22, font = "TeX Gyre Heros Bold Makie")
+
 
     add_property_panels!(fig, 1, energy, palette, "Ha/atom")
-    add_property_panels!(fig, 2, forces, palette, "Ha/bohr")
+
+    if !isnothing(forces)
+        add_property_panels!(fig, 2, forces, palette, "Ha/Bohr")
+        Label(fig[0, 1:2],
+            "Model performance — energies only",
+            fontsize = 26,
+            font = "TeX Gyre Heros Bold Makie")
+    else
+        Label(fig[0, 1],
+            "Uncertainty calibration: dataset with forces",
+            fontsize = 26, font = "TeX Gyre Heros Bold Makie")
+    end
 
     rowgap!(fig.layout, 18)
     colgap!(fig.layout, 18)

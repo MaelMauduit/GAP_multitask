@@ -27,8 +27,18 @@ using StaticArrays
 using LinearAlgebra
 using UnitfulAtomic
 
-l = 6.
-bcc_crystal = BCC(l, :Si, SVector(1,1,1))
+# l = 7.3 #Bohr probably #around 5.8 for bcc
+# bcc_crystal = FCC(l, :Si, SVector(1,1,1))
+
+# d = 10.26   # ≈ 5.43 Å pour le Si
+# bcc_crystal = Diamond(d, :Si, SVector(1,1,1))
+
+# l = 5.8   # ≈ 5.43 Å pour le Si
+# bcc_crystal = BCC(l, :Si, SVector(1,1,1))
+
+e = 5.5   # bohr (3.84 Å)
+f = 9.1  # bohr (6.34 Å)   
+bcc_crystal = HCP(e, f, SVector(1,1,1); atomic_symbol=:Si)
 
 lattice0 = bcc_crystal.lattice.primitive_vectors
 
@@ -40,8 +50,13 @@ pos_cart = hcat([at.position for at in bcc_crystal.atoms]...)
 pos_frac = [SVector{3}(lattice0 \ pos_cart[:,i]) for i in 1:size(pos_cart,2)]
 
 Ecut = length(ARGS) >= 2 ? parse(Float64, ARGS[1]) : 10.0 # ici tu peux jouer avec le paramètre Ecut
-kgrid = [8, 8, 5] # discrétisation pour les intégrales en Fourier -- comparer avec rapport de victor
-scftol = 1e-4 # paramètre de tolérance pour l'algo itératif--idem voir rapport victor
+# kgrid = [8, 8, 5] # discrétisation pour les intégrales en Fourier -- comparer avec rapport de victor
+
+k_spacing = 0.1
+kgrid = kgrid_from_maximal_spacing(lattice0, k_spacing)
+println("the grid is: ", kgrid)  # -> [N1, N2, N3]
+
+scftol = 1e-6 # paramètre de tolérance pour l'algo itératif--idem voir rapport victor
 
 scale_min    = parse(Float64, ARGS[2])
 scale_max    = parse(Float64, ARGS[3])
@@ -62,7 +77,8 @@ stresses = Matrix{Float64}[]
 
 for s in scaling_3D
     a,b,c = s
-    lattice = lattice0 * Diagonal([a,b,c])
+    bcc_crystal = HCP(a*e, a*f, SVector(1,1,1); atomic_symbol=:Si)
+    lattice = bcc_crystal.lattice.primitive_vectors
 
     # calcul DFT a proprement parler
     model = model_DFT(lattice, atoms, pos_frac; functionals=PBE(), temperature=1e-3)

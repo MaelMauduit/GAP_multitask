@@ -72,5 +72,5 @@ def run_dft(Ecut, scale_min, scale_max, number_of_points, isotrope):
 
     # write trajectory
     from ase.io import write
-    write(f"bcc_dft_{Ecut}.xyz", frames)
-    print(f"bcc_dft.xyz", "done")
+    write(f"hcp_report_dft_{Ecut}.xyz", frames)
+    print(f"hcp_report_dft_{Ecut}.xyz", "done")

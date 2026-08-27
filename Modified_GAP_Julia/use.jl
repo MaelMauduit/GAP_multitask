@@ -7,25 +7,15 @@ path  = @__DIR__
 
 include( path*"/multitask2.jl")
 
-
-
-
-
 # ============================================================
 # Loading full available datasets
 # ============================================================
 
-Xtrain26, Ytrain26, ltrain26 = read_data("/Datasets/train26.xyz") ## Careful to the used dataset
-Xbcc26, Ybcc26, lb26 = read_data("/Datasets/bcc26.xyz") 
+Xtrain26, Ytrain26, ltrain26 = read_data("/Datasets/train26nobccCart.xyz") ## Careful to the used dataset
 Xtest, Ytest, lt = read_data("/Datasets/bcc_dft_26.xyz")
 
-X = vcat(Xtrain26, Xbcc26, Xtest)
-Y = vcat(Ytrain26, Ybcc26, Ytest)
-
-# indx = (e = (p = union(1:ltrain26+lb26), s = []), f = (p = union([]), s = []), v = (p = union([]), s = []) )
-# X = X_normalise(X, indx) # Normalise the features
-
-
+X = vcat(Xtrain26, Xtest)
+Y = vcat(Ytrain26, Ytest)
 
 
 # ============================================================
@@ -38,12 +28,11 @@ train_features = idx[1:(3*ltrain26) ÷ 4]
 # test_features = idx[((3*ltrain26) ÷ 4) + 1:end]
 
 # train_features = fps(X[1:ltrain26], (2*ltrain26)//3)
-test_features = ltrain26+lb26+1:ltrain26+lb26+lt
+test_features = ltrain26+1:ltrain26+lt
 
-train_features = union(train_features, test_features[20:25])
+train_features = union(train_features, test_features[3], test_features[7], test_features[17])
 
-train = (e = (p = train_features, s = []), f = (p = [], s = []), v = (p = [], s = []))
-# train = (e = (p = union(train_features, test_features[20:25]), s = []), f = (p = [], s = []), v = (p = [], s = []))
+train = (e = (p = union(train_features), s = []), f = (p = [], s = []), v = (p = [], s = []))
 # train = (e = (p = union(bcc_features, test_features[1]), s = []), f = (p = [], s = []), v = (p = [], s = []))
 
 test_e = (e = (p = test_features, s = []), f = (p = [], s = []), v = (p = [], s = []) )
@@ -74,7 +63,7 @@ training_points, mean, std = select_observations(X, Y, train, true)
 η  = ( e=( p=1e-8, s=[] ), f=( p=6, s=[] ), v=( p=0.01, s=[] ))
 ϱ  = ( e=[], f=[], v=[] ) 
 
-K, kept_lines, data, σ², ϱ, η, mean_for_1_atom, std_for_1_atom = train_model(X, Y, train, 0; estimator = "nll", ζ=4, normalisation=normalisation, hyper = (σ², ϱ, η))
+K, kept_lines, data, σ², ϱ, η, mean_for_1_atom, std_for_1_atom = train_model(X, Y, train, 0; estimator = "nll", ζ=4, normalisation=normalisation)
 m, S, K = multitask(X, train, test_e_and_f, K, kept_lines, data, σ², ϱ, η, mean_for_1_atom, std_for_1_atom; ζ=4, normalisation=normalisation, denorm = false)
 
 V = sqrt.(diag(S)) 
@@ -102,7 +91,7 @@ nb = numbers_of_atoms_energy(X, test_e)
 # plot_eigenvalues(K)
 
 
-ε       = r2(E_pred, truth)
+ε       = rmse(E_pred, truth, nb.p)
 εforces = rmse(F_pred, forces)
 
 println("Energy R²  = ", ε)
@@ -113,20 +102,20 @@ y_pred = E_pred
 
 fig = plot_predictions_pro(y_pred, y_true, std_E, F_pred, forces, std_F; model_name = "GNN-v2")
 fig
-y_true
+
 volume = vcat((Y[k].volume for k in test_features)...)
 
-train_plot = (e = (p = test_features[20:25], s = []), f = (p = [], s = []), v = (p = [], s = []))
+train_plot = (e = (p = union(test_features[3], test_features[7], test_features[17]), s = []), f = (p = [], s = []), v = (p = [], s = []))
 nb_train = numbers_of_atoms_energy(X, train_plot)
 
-extra_train = test_features[20:25]
+extra_train = union(test_features[3], test_features[7], test_features[17])
 
 idx_plot_train = findall(x -> x in extra_train, train.e.p)
 
 training_points = training_points[idx_plot_train] .* std
 train_volume = vcat((Y[k].volume for k in extra_train)...)
 
-fig2 = plot_result(y_pred, std_E, y_true, volume, nb.p, training_points, train_volume , nb_train.p, ε)
+fig2 = plot_result(y_pred, std_E, y_true, volume, nb.p, training_points, train_volume , nb_train.p, ε, savedir="pred_E_V.png")
 
 # save("3.forces.png",fig2)
 # save("4.energies.png",fig2)

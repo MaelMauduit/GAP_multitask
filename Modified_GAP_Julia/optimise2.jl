@@ -30,7 +30,6 @@ struct DataInfo
     nS::Int
     C::CovMatrices
     X::Any
-    key::Any
 end
 
 function BlockSizes(Y, train)
@@ -59,9 +58,10 @@ function get_jitter(h::HyperParams, Y, train, kept, K)
     true_nf = length(sort_lines[(sort_lines .> ne) .& (sort_lines .<= ne + nf)])
     true_nv = length(sort_lines[sort_lines .> ne + nf])
 
-    Me = safe_mean_diag(K, 1:true_ne)
-    Mf = safe_mean_diag(K, true_ne+1:true_ne+true_nf)
-    Mv = safe_mean_diag(K, true_ne+true_nf+1:true_ne+true_nf+true_nv)
+    K_filtered = K[kept, kept]
+    Me = safe_mean_diag(K_filtered, 1:true_ne)
+    Mf = safe_mean_diag(K_filtered, true_ne+1:true_ne+true_nf)
+    Mv = safe_mean_diag(K_filtered, true_ne+true_nf+1:true_ne+true_nf+true_nv)
 
     ηe = max(1e-7 * Me, 1e-4 * h.ηe)
     ηf = max(1e-7 * Mf, 1e-4 * h.ηf)
@@ -77,13 +77,14 @@ function full_matrix(h::HyperParams, Info::DataInfo)
     η  = ( e=( p=h.ηe, s=h.ηe * vect_one ), f=( p=h.ηf, s=h.ηf * vect_one ), v=( p=h.ηv, s=h.ηv * vect_one ))
 
     C = Info.C
-    K = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true, Info.X, Info.key)
-    K = K[Info.kept, Info.kept]
+    K = hyperparameters(C.Ce, C.Cf, C.Cv, C.Cfe, C.Cve, C.Cvf, σ², ϱ, η, true, Info.X, Info.train)
 
     jitter  = get_jitter(h, Info.Y, Info.train, Info.kept, K)
     ne, ηe = jitter[1]
     nf, ηf = jitter[2]
     nv, ηv = jitter[3]
+
+    K = K[Info.kept, Info.kept]
 
     D = Diagonal(vcat(fill(ηe, ne), fill(ηf, nf), fill(ηv, nv)))
 
@@ -93,6 +94,7 @@ end
 
 
 function optim(Info, estimator)
+    println("Starting the optimization with optimizer: LBFGS")
     nS = Info.nS
     w = 2*nS + 4
     methods = Dict(
@@ -123,14 +125,45 @@ function optim(Info, estimator)
     return result
 end
 
+
+function optim2(Info, estimator)
+    println("Starting the optimization with optimizer: IPNewton")
+    nS = Info.nS
+    w = 2*nS + 4
+    methods = Dict(
+        "nll"  => nll,
+        "map"  => map,
+        "pnll" => pnll,
+    )
+    f(lh) = methods[estimator](vcat(lh), Info)
+
+    lower = fill(-8.0, w)
+    upper = fill(8.0, w)
+    p0 = vcat([-0.], fill(-4., nS), fill(0., nS), [-5., -5., -5.])
+
+    df  = TwiceDifferentiable(f, p0; autodiff = :forward)
+    dfc = TwiceDifferentiableConstraints(lower, upper)
+
+    result = optimize(
+        df, dfc, p0,
+        IPNewton(),
+        Optim.Options(
+            iterations = 50,
+            show_trace = true
+        )
+    )
+    return result
+end
+
+
 function construct_hyperparam(res, number_of_tasks)
     vect_one = ones(number_of_tasks)
 
     σ²e = 10^res[1]
 
     if number_of_tasks == 0
-        σ² = []
-        ϱ = []
+        σ² = Float64[]
+        ϱ = Float64[]
     else 
         σ² = 10 .^res[2:1+number_of_tasks]
         ϱ = 10 .^res[number_of_tasks+2:2*number_of_tasks+1]
@@ -151,9 +184,9 @@ function Global_optimizer(X, Y, train, kept_lines, number_of_tasks; estimator = 
     y, _, _ = select_observations(X, Y, train, normalisation)
     y = y[kept_lines] 
 
-    Info = DataInfo(Y, y, train, kept_lines, number_of_tasks, C, X, train)
+    Info = DataInfo(Y, y, train, kept_lines, number_of_tasks, C, X)
 
-    result = optim(Info, estimator)
+    result = optim2(Info, estimator)
     res = Optim.minimizer(result)
     nll_val = Optim.minimum(result)
     println("The optimisation obtained the nll value ", nll_val, " thanks to the parameters ", res, "with a final gradient of ")
@@ -167,14 +200,14 @@ end
 function plot_nll_2d(X, Y, train, kept_lines, number_of_tasks,
                      lh0, hyper_x, hyper_y,
                      low_x, up_x, low_y, up_y;
-                     n=20, normalisation=true)
+                     n=20, normalisation=true, ζ = 4)
 
     Ce, Cf, Cv, Cfe, Cve, Cvf = construct_matrices(X, train, ζ)
     C = CovMatrices(Ce, Cf, Cv, Cfe, Cve, Cvf)
     y, _, _ = select_observations(X, Y, train, normalisation)
     y = y[kept_lines] 
 
-    Info = DataInfo(Y, y, train, kept_lines, number_of_tasks, C)
+    Info = DataInfo(Y, y, train, kept_lines, number_of_tasks, C, X)
 
     xs = range(low_x, up_x, length=n)
     ys = range(low_y, up_y, length=n)

@@ -82,7 +82,7 @@ function describe(config, desc::SOAPDescriptor)
     result = desc.pydesc.calc(config)
     X = result["data"]
     m = sqrt.(sum(X.^2; dims=2))
-    return X ./ m
+    return X ./ m # Ici tu normalise ton descripteur -> check si c'est pris en compte dans le calcul du kernel
 end
 
 """
