@@ -311,8 +311,8 @@ function create_filter_cov(X, Y, train, nS, ζ, rtol; only_K=false)
     σ² = (e = (p = 1.0, s = vect), f = (p = 1.0, s = vect), v = (p = 1.0, s = vect)) 
     η = (e = (p = 0., s = 0. * ones(nS)), f = (p = 0., s = 0. * ones(nS)), v = (p = 0., s = 0. * ones(nS)))
     ϱ = (e = 1.0 .* ones(nS), f = 1.0 .* ones(nS), v = 1.0 .* ones(nS))
-    println(train, σ², ϱ, η)
     K_no_hyper = construct_covariance(X, train, σ², ϱ, η, true, ζ)
+    print(K_no_hyper)
     if isempty(K_no_hyper)
         return []
     end

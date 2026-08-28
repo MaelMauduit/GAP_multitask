@@ -10,8 +10,8 @@ include(path * "/multitask2.jl")
 # Chargement des données
 # ============================================================
 
-Xtrain26, Ytrain26, ltrain26 = read_data("/Datasets/train26nobccCart.xyz")
-Xtrain10, Ytrain10, ltrain10 = read_data("/Datasets/train10nobccCart.xyz")
+Xtrain26, Ytrain26, ltrain26 = read_data("/Datasets/train26nobccCart.xyz"; sigma = 1)
+Xtrain10, Ytrain10, ltrain10 = read_data("/Datasets/train10nobccCart.xyz"; sigma = 1)
 Xtest, Ytest, lt = read_data("/Datasets/bcc_dft_26.xyz")
 Xadd, Yadd, ladd = read_data("/Datasets/bcc_dft_10.xyz")
 
@@ -36,16 +36,16 @@ add_features = ltrain26 + ltrain10 + lt + 9:ltrain26 + ltrain10 + lt + 11
 add_features_extremal = union(add_features, [ltrain26 + ltrain10 + lt + 1,ltrain26 + ltrain10 + lt + ladd])
 
 
-train1 = (e = (p = train_features, s = [train_features_multitask]), f = (p = train_features, s = [[]]), v = (p = [], s = [[]]))
-train2 = (e = (p = train_features, s = [train_features_multitask]), f = (p = train_features, s = [[train_features_multitask]]), v = (p = [], s = [[]]))
+train1 = (e = (p = train_features, s = []), f = (p = [], s = []), v = (p = [], s = []))
+train2 = (e = (p = train_features, s = [train_features_multitask]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
 
-test_e1 = (e = (p = test_features, s = [[]]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
+test_e1 = (e = (p = test_features, s = []), f = (p = [], s = []), v = (p = [], s = []))
 test_e2 = (e = (p = test_features, s = [[]]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
 
-add1 = (e = (p = add_features, s = [[]]), f = (p = add_features, s = [[]]), v = (p = [], s = [[]]))
-add2 = (e = (p = [], s = [add_features]), f = (p = add_features, s = [[]]), v = (p = [], s = [[]]))
+add1 = (e = (p = add_features, s = []), f = (p = [], s = []), v = (p = [], s = []))
+add2 = (e = (p = [], s = [add_features]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
 
-add1ex = (e = (p = add_features_extremal, s = [[]]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
+add1ex = (e = (p = add_features_extremal, s = []), f = (p = [], s = []), v = (p = [], s = []))
 add2ex = (e = (p = [], s = [add_features_extremal]), f = (p = [], s = [[]]), v = (p = [], s = [[]]))
 
 ζ = 4
@@ -59,7 +59,7 @@ c1 = ( e=( p=2e-5, s=[] ), f=( p=1e-3, s=[] ), v=( p=1, s=[] ))
 a2 = ( e=( p=8.39, s=[0.001] ), f=( p=8.39, s=[0.001] ), v=( p=8.39, s=[0.001] ))
 b2 = ( e=[1.006], f=[1.006], v=[1.006])
 c2 = ( e=( p=2e-5, s=[2e-5] ), f=( p=1e-3, s=[1e-3] ), v=( p=1., s=[1.] ))
-K1, kept_lines1, data1, σ²1, ϱ1, η1, mean1, std1 = train_model(X, Y, train1, 1; estimator = "nll", ζ = ζ, normalisation = normalisation) #, hyper=(a1,b1,c1))
+K1, kept_lines1, data1, σ²1, ϱ1, η1, mean1, std1 = train_model(X, Y, train1, 0; estimator = "nll", ζ = ζ, normalisation = normalisation) #, hyper=(a1,b1,c1))
 K2, kept_lines2, data2, σ²2, ϱ2, η2, mean2, std2 = train_model(X, Y, train2, 1; estimator = "nll", ζ = ζ, normalisation = normalisation) #, hyper=(a2,b2,c2))
 
 m = Matrix{Any}(undef, 2, 3)
@@ -185,7 +185,7 @@ colgap!(fig.layout, 8)
 rowgap!(fig.layout, 12)
 include(path * "/multitask2.jl")
 
-save(joinpath(path, "Plot_report", "multi_forces_break.png"), fig)
+save(joinpath(path, "Plot_report", "depression.png"), fig)
 
 
 

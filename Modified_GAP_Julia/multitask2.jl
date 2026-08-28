@@ -91,6 +91,7 @@ end
 
 function train_model(X, Y, train, number_of_task; estimator = "nll", ζ=4, normalisation=false, hyper = nothing)
     kept_lines = create_filter_cov_decoupled(X, Y, train,number_of_task,ζ) 
+    print(kept_lines)
     if isnothing(hyper)
         σ², ϱ, η = Global_optimizer(X, Y, train, kept_lines, number_of_task; 
                                     estimator = estimator,
@@ -99,7 +100,8 @@ function train_model(X, Y, train, number_of_task; estimator = "nll", ζ=4, norma
     else
         σ², ϱ, η = hyper
     end
-    
+    println("The hyperparameters have been optimised with \n σ² = ", σ², "\n ϱ = ", ϱ, "\n η = ", η)
+
 
     K = construct_covariance(X, train, σ², ϱ, η, true, ζ)
 

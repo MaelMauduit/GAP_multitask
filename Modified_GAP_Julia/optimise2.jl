@@ -63,9 +63,9 @@ function get_jitter(h::HyperParams, Y, train, kept, K)
     Mf = safe_mean_diag(K_filtered, true_ne+1:true_ne+true_nf)
     Mv = safe_mean_diag(K_filtered, true_ne+true_nf+1:true_ne+true_nf+true_nv)
 
-    ηe = max(1e-7 * Me, 1e-4 * h.ηe)
-    ηf = max(1e-7 * Mf, 1e-4 * h.ηf)
-    ηv = max(1e-7 * Mv, 1e-4 * h.ηv)
+    ηe = max(1e-7 * Me)
+    ηf = max(1e-7 * Mf)
+    ηv = max(1e-7 * Mv)
     jitter = ((true_ne,ηe) , (true_nf,ηf) , (true_nv,ηv))
     return jitter
 end
